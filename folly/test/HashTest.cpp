@@ -238,6 +238,46 @@ TEST(Hash, std_tuple) {
   EXPECT_EQ("bar", m[t]);
 }
 
+TEST(Hash, enum_type) {
+  const auto hash = folly::Hash();
+
+  enum class Enum32 : int32_t { Foo, Bar };
+  EXPECT_EQ(hash(static_cast<int32_t>(Enum32::Foo)), hash(Enum32::Foo));
+  EXPECT_EQ(hash(static_cast<int32_t>(Enum32::Bar)), hash(Enum32::Bar));
+  EXPECT_NE(hash(Enum32::Foo), hash(Enum32::Bar));
+
+  std::unordered_map<Enum32, std::string, folly::Hash> m32;
+  m32[Enum32::Foo] = "foo";
+  EXPECT_EQ("foo", m32[Enum32::Foo]);
+
+  enum class Enum64 : int64_t { Foo, Bar };
+  EXPECT_EQ(hash(static_cast<int64_t>(Enum64::Foo)), hash(Enum64::Foo));
+  EXPECT_EQ(hash(static_cast<int64_t>(Enum64::Bar)), hash(Enum64::Bar));
+  EXPECT_NE(hash(Enum64::Foo), hash(Enum64::Bar));
+
+  std::unordered_map<Enum64, std::string, folly::Hash> m64;
+  m64[Enum64::Foo] = "foo";
+  EXPECT_EQ("foo", m64[Enum64::Foo]);
+}
+
+TEST(Hash, pair_folly_hash) {
+  typedef std::pair<int64_t, int32_t> pair2;
+  pair2 p(42, 1);
+
+  std::unordered_map<pair2, std::string, folly::Hash> m;
+  m[p] = "bar";
+  EXPECT_EQ("bar", m[p]);
+}
+
+TEST(Hash, tuple_folly_hash) {
+  typedef std::tuple<int64_t, int32_t, int32_t> tuple3;
+  tuple3 t(42, 1, 1);
+
+  std::unordered_map<tuple3, std::string, folly::Hash> m;
+  m[t] = "bar";
+  EXPECT_EQ("bar", m[t]);
+}
+
 namespace {
 template <class T>
 size_t hash_vector(const std::vector<T>& v) {
@@ -263,7 +303,7 @@ TEST(Hash, std_tuple_different_hash) {
             std::hash<tuple3>()(t3));
 }
 
-TEST(Range, Hash) {
+TEST(Hash, Strings) {
   using namespace folly;
 
   StringPiece a1 = "10050517", b1 = "51107032",
@@ -289,4 +329,10 @@ TEST(Range, Hash) {
   EXPECT_NE(h2(w1), h2(w2));
   EXPECT_NE(h2(w1), h2(w3));
   EXPECT_NE(h2(w2), h2(w4));
+
+  // Check compatibility with std::string.
+  EXPECT_EQ(h2(a1), h2(a1.str()));
+  EXPECT_EQ(h2(a2), h2(a2.str()));
+  EXPECT_EQ(h2(a3), h2(a3.str()));
+  EXPECT_EQ(h2(a4), h2(a4.str()));
 }

@@ -66,6 +66,7 @@ inline void FiberManager::runReadyFiber(Fiber* fiber) {
   assert(fiber->state_ == Fiber::NOT_STARTED ||
          fiber->state_ == Fiber::READY_TO_RUN);
   currentFiber_ = fiber;
+  fiber->rcontext_ = RequestContext::setContext(std::move(fiber->rcontext_));
   if (observer_) {
     observer_->starting(reinterpret_cast<uintptr_t>(fiber));
   }
@@ -92,6 +93,7 @@ inline void FiberManager::runReadyFiber(Fiber* fiber) {
       observer_->stopped(reinterpret_cast<uintptr_t>(fiber));
     }
     currentFiber_ = nullptr;
+    fiber->rcontext_ = RequestContext::setContext(std::move(fiber->rcontext_));
   } else if (fiber->state_ == Fiber::INVALID) {
     assert(fibersActive_ > 0);
     --fibersActive_;
@@ -113,9 +115,12 @@ inline void FiberManager::runReadyFiber(Fiber* fiber) {
       observer_->stopped(reinterpret_cast<uintptr_t>(fiber));
     }
     currentFiber_ = nullptr;
+    fiber->rcontext_ = RequestContext::setContext(std::move(fiber->rcontext_));
     fiber->localData_.reset();
+    fiber->rcontext_.reset();
 
-    if (fibersPoolSize_ < options_.maxFibersPoolSize) {
+    if (fibersPoolSize_ < options_.maxFibersPoolSize ||
+        options_.fibersPoolResizePeriodMs > 0) {
       fibersPool_.push_front(*fiber);
       ++fibersPoolSize_;
     } else {
@@ -128,6 +133,7 @@ inline void FiberManager::runReadyFiber(Fiber* fiber) {
       observer_->stopped(reinterpret_cast<uintptr_t>(fiber));
     }
     currentFiber_ = nullptr;
+    fiber->rcontext_ = RequestContext::setContext(std::move(fiber->rcontext_));
     fiber->state_ = Fiber::READY_TO_RUN;
     yieldedFibers_.push_back(*fiber);
   }
@@ -168,6 +174,7 @@ inline bool FiberManager::loopUntilNoReady() {
         if (task->localData) {
           fiber->localData_ = *task->localData;
         }
+        fiber->rcontext_ = std::move(task->rcontext);
 
         fiber->setFunction(std::move(task->func));
         fiber->data_ = reinterpret_cast<intptr_t>(fiber);
@@ -471,6 +478,7 @@ inline void FiberManager::initLocalData(Fiber& fiber) {
   if (fm && fm->currentFiber_ && fm->localType_ == localType_) {
     fiber.localData_ = fm->currentFiber_->localData_;
   }
+  fiber.rcontext_ = RequestContext::saveContext();
 }
 
 template <typename LocalT>
@@ -479,6 +487,7 @@ FiberManager::FiberManager(
   std::unique_ptr<LoopController> loopController__,
   Options options)  :
     loopController_(std::move(loopController__)),
+    stackAllocator_(options.useGuardPages),
     options_(preprocessOptions(std::move(options))),
     exceptionCallback_([](std::exception_ptr eptr, std::string context) {
         try {
@@ -495,6 +504,7 @@ FiberManager::FiberManager(
         }
       }),
     timeoutManager_(std::make_shared<TimeoutController>(*loopController_)),
+    fibersPoolResizer_(*this),
     localType_(typeid(LocalT)) {
   loopController_->setFiberManager(this);
 }
@@ -511,7 +521,7 @@ inline await(F&& func) {
       func(Promise<Result>(result, baton));
     });
 
-  return folly::moveFromTry(std::move(result));
+  return folly::moveFromTry(result);
 }
 
 }}

@@ -17,6 +17,7 @@
 #pragma once
 
 #include <folly/futures/Promise.h>
+#include <folly/Portability.h>
 
 namespace folly {
 
@@ -64,7 +65,8 @@ public:
       p.setException(std::current_exception());
     }
     */
-  void setException(std::exception_ptr const&) DEPRECATED;
+  FOLLY_DEPRECATED("use setException(exception_wrapper)")
+  void setException(std::exception_ptr const&);
 
   /** Fulfill the SharedPromise with an exception type E, which can be passed to
     std::make_exception_ptr(). Useful for originating exceptions. If you
@@ -80,13 +82,6 @@ public:
   /// an exception (or special value) indicating how the interrupt was
   /// handled.
   void setInterruptHandler(std::function<void(exception_wrapper const&)>);
-
-  /// Fulfill this SharedPromise<void>
-  template <class B = T>
-  typename std::enable_if<std::is_void<B>::value, void>::type
-  setValue() {
-    setTry(Try<T>());
-  }
 
   /// Sugar to fulfill this SharedPromise<Unit>
   template <class B = T>
@@ -109,6 +104,8 @@ public:
   */
   template <class F>
   void setWith(F&& func);
+
+  bool isFulfilled();
 
 private:
   std::mutex mutex_;

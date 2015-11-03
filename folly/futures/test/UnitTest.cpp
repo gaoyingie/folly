@@ -26,8 +26,16 @@ TEST(Unit, futureDefaultCtor) {
   Future<Unit>();
 }
 
+TEST(Unit, operatorEq) {
+  EXPECT_TRUE(Unit{} == Unit{});
+}
+
+TEST(Unit, operatorNe) {
+  EXPECT_FALSE(Unit{} != Unit{});
+}
+
 TEST(Unit, voidOrUnit) {
-  EXPECT_TRUE(is_void_or_unit<void>::value);
+  EXPECT_TRUE(is_void_or_unit<Unit>::value);
   EXPECT_TRUE(is_void_or_unit<Unit>::value);
   EXPECT_FALSE(is_void_or_unit<int>::value);
 }
@@ -45,10 +53,28 @@ TEST(Unit, liftInt) {
 }
 
 TEST(Unit, liftVoid) {
-  using Lifted = Unit::Lift<void>;
+  using Lifted = Unit::Lift<Unit>;
   EXPECT_TRUE(Lifted::value);
   auto v = std::is_same<Unit, Lifted::type>::value;
   EXPECT_TRUE(v);
+}
+
+TEST(Unit, dropInt) {
+  using dropped = typename Unit::Drop<int>;
+  EXPECT_FALSE(dropped::value);
+  EXPECT_TRUE((std::is_same<int, dropped::type>::value));
+}
+
+TEST(Unit, dropUnit) {
+  using dropped = typename Unit::Drop<Unit>;
+  EXPECT_TRUE(dropped::value);
+  EXPECT_TRUE((std::is_void<dropped::type>::value));
+}
+
+TEST(Unit, dropVoid) {
+  using dropped = typename Unit::Drop<void>;
+  EXPECT_TRUE(dropped::value);
+  EXPECT_TRUE((std::is_void<dropped::type>::value));
 }
 
 TEST(Unit, futureToUnit) {
@@ -60,7 +86,7 @@ TEST(Unit, futureToUnit) {
 TEST(Unit, voidFutureToUnit) {
   Future<Unit> fu = makeFuture().unit();
   fu.value();
-  EXPECT_TRUE(makeFuture<void>(eggs).unit().hasException());
+  EXPECT_TRUE(makeFuture<Unit>(eggs).unit().hasException());
 }
 
 TEST(Unit, unitFutureToUnitIdentity) {
@@ -75,4 +101,10 @@ TEST(Unit, toUnitWhileInProgress) {
   EXPECT_FALSE(fu.isReady());
   p.setValue(42);
   EXPECT_TRUE(fu.isReady());
+}
+
+TEST(Unit, makeFutureWith) {
+  int count = 0;
+  Future<Unit> fu = makeFutureWith([&]{ count++; });
+  EXPECT_EQ(1, count);
 }

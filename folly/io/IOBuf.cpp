@@ -112,7 +112,7 @@ struct IOBuf::HeapFullStorage {
 
   HeapStorage hs;
   SharedInfo shared;
-  MaxAlign align;
+  std::max_align_t align;
 };
 
 IOBuf::SharedInfo::SharedInfo()
@@ -550,6 +550,19 @@ void IOBuf::unshareChained() {
 
   // We have to unshare.  Let coalesceSlow() do the work.
   coalesceSlow();
+}
+
+void IOBuf::makeManagedChained() {
+  assert(isChained());
+
+  IOBuf* current = this;
+  while (true) {
+    current->makeManagedOne();
+    current = current->next_;
+    if (current == this) {
+      break;
+    }
+  }
 }
 
 void IOBuf::coalesceSlow() {

@@ -46,8 +46,12 @@ extern "C" {
 #include <folly/Conv.h>
 #include <folly/Format.h>
 
-#if defined(__APPLE__) && !defined(s6_addr16)
-# define s6_addr16 __u6_addr.__u6_addr16
+// BSDish platforms don't provide standard access to s6_addr16
+#ifndef s6_addr16
+# if defined(__APPLE__) || defined(__FreeBSD__) || \
+     defined(__NetBSD__) || defined(__OpenBSD__)
+#  define s6_addr16 __u6_addr.__u6_addr16
+# endif
 #endif
 
 namespace folly { namespace detail {
@@ -279,7 +283,11 @@ inline std::string fastIpv4ToString(
 }
 
 inline std::string fastIpv6ToString(const in6_addr& in6Addr) {
+#ifdef _MSC_VER
+  const uint16_t* bytes = reinterpret_cast<const uint16_t*>(&in6Addr.u.Word);
+#else
   const uint16_t* bytes = reinterpret_cast<const uint16_t*>(&in6Addr.s6_addr16);
+#endif
   char str[sizeof("2001:0db8:0000:0000:0000:ff00:0042:8329")];
   char* buf = str;
 

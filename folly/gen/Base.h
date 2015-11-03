@@ -17,18 +17,19 @@
 #ifndef FOLLY_GEN_BASE_H
 #define FOLLY_GEN_BASE_H
 
+#include <algorithm>
 #include <functional>
 #include <memory>
-#include <type_traits>
-#include <utility>
-#include <algorithm>
 #include <random>
-#include <vector>
+#include <type_traits>
+#include <unordered_map>
 #include <unordered_set>
+#include <utility>
+#include <vector>
 
-#include <folly/Range.h>
-#include <folly/Optional.h>
 #include <folly/Conv.h>
+#include <folly/Optional.h>
+#include <folly/Range.h>
 #include <folly/gen/Core.h>
 
 /**
@@ -79,13 +80,6 @@
 */
 
 namespace folly { namespace gen {
-
-class EmptySequence : public std::exception {
-public:
-  virtual const char* what() const noexcept {
-    return "This operation cannot be called on an empty sequence";
-  }
-};
 
 class Less {
 public:
@@ -214,6 +208,30 @@ public:
   }
 };
 
+/**
+ * Class and helper function for negating a boolean Predicate
+ */
+template <class Predicate>
+class Negate {
+  Predicate pred_;
+
+ public:
+  Negate() = default;
+
+  explicit Negate(Predicate pred)
+    : pred_(std::move(pred))
+  {}
+
+  template <class Arg>
+  bool operator()(Arg&& arg) const {
+    return !pred_(std::forward<Arg>(arg));
+  }
+};
+template <class Predicate>
+Negate<Predicate> negate(Predicate pred) {
+  return Negate<Predicate>(std::move(pred));
+}
+
 template <class Dest>
 class Cast {
  public:
@@ -241,6 +259,9 @@ class To<StringPiece> {
   }
 };
 
+template<class Key, class Value>
+class Group;
+
 namespace detail {
 
 template<class Self>
@@ -251,13 +272,9 @@ struct FBounded;
  */
 template<class Container>
 struct ValueTypeOfRange {
- private:
-  static Container container_;
  public:
-  typedef decltype(*std::begin(container_))
-    RefType;
-  typedef typename std::decay<decltype(*std::begin(container_))>::type
-    StorageType;
+  using RefType = decltype(*std::begin(std::declval<Container&>()));
+  using StorageType = typename std::decay<RefType>::type;
 };
 
 
@@ -327,6 +344,9 @@ template<class Selector, class Comparer = Less>
 class Order;
 
 template<class Selector>
+class GroupBy;
+
+template<class Selector>
 class Distinct;
 
 template<class Operators>
@@ -339,6 +359,7 @@ class Concat;
 
 class RangeConcat;
 
+template <bool forever>
 class Cycle;
 
 class Batch;
@@ -356,10 +377,8 @@ class FoldLeft;
 
 class First;
 
-class Any;
-
-template<class Predicate>
-class All;
+template <bool result>
+class IsEmpty;
 
 template<class Reducer>
 class Reduce;
@@ -389,6 +408,11 @@ class Contains;
 template<class Exception,
          class ErrorHandler>
 class GuardImpl;
+
+template <class T>
+class UnwrapOr;
+
+class Unwrap;
 
 }
 
@@ -607,16 +631,10 @@ Map field(FieldType Class::*field) {
   return Map(Field(field));
 }
 
-template<class Predicate,
-         class Filter = detail::Filter<Predicate>>
+template <class Predicate = Identity,
+          class Filter = detail::Filter<Predicate>>
 Filter filter(Predicate pred = Predicate()) {
   return Filter(std::move(pred));
-}
-
-template<class Predicate,
-         class All = detail::All<Predicate>>
-All all(Predicate pred = Predicate()) {
-  return All(std::move(pred));
 }
 
 template<class Predicate,
@@ -638,6 +656,12 @@ template<class Selector = Identity,
          class Order = detail::Order<Selector, Greater>>
 Order orderByDescending(Selector selector = Selector()) {
   return Order(std::move(selector));
+}
+
+template <class Selector = Identity,
+          class GroupBy = detail::GroupBy<Selector>>
+GroupBy groupBy(Selector selector = Selector()) {
+  return GroupBy(std::move(selector));
 }
 
 template<class Selector = Identity,
@@ -674,6 +698,63 @@ detail::TypeAssertion<Value> assert_type() {
 /*
  * Sink Factories
  */
+
+/**
+ * any() - For determining if any value in a sequence satisfies a predicate.
+ *
+ * The following is an example for checking if any computer is broken:
+ *
+ *   bool schrepIsMad = from(computers) | any(isBroken);
+ *
+ * (because everyone knows Schrep hates broken computers).
+ *
+ * Note that if no predicate is provided, 'any()' checks if any of the values
+ * are true when cased to bool. To check if any of the scores are nonZero:
+ *
+ *   bool somebodyScored = from(scores) | any();
+ *
+ * Note: Passing an empty sequence through 'any()' will always return false. In
+ * fact, 'any()' is equivilent to the composition of 'filter()' and 'notEmpty'.
+ *
+ *   from(source) | any(pred) == from(source) | filter(pred) | notEmpty
+ */
+
+template <class Predicate = Identity,
+          class Filter = detail::Filter<Predicate>,
+          class NotEmpty = detail::IsEmpty<false>,
+          class Composed = detail::Composed<Filter, NotEmpty>>
+Composed any(Predicate pred = Predicate()) {
+  return Composed(Filter(std::move(pred)), NotEmpty());
+}
+
+/**
+ * all() - For determining whether all values in a sequence satisfy a predicate.
+ *
+ * The following is an example for checking if all members of a team are cool:
+ *
+ *   bool isAwesomeTeam = from(team) | all(isCool);
+ *
+ * Note that if no predicate is provided, 'all()'' checks if all of the values
+ * are true when cased to bool.
+ * The following makes sure none of 'pointers' are nullptr:
+ *
+ *   bool allNonNull = from(pointers) | all();
+ *
+ * Note: Passing an empty sequence through 'all()' will always return true. In
+ * fact, 'all()' is equivilent to the composition of 'filter()' with the
+ * reversed predicate and 'isEmpty'.
+ *
+ *   from(source) | all(pred) == from(source) | filter(negate(pred)) | isEmpty
+ */
+
+template <class Predicate = Identity,
+          class Filter = detail::Filter<Negate<Predicate>>,
+          class IsEmpty = detail::IsEmpty<true>,
+          class Composed = detail::Composed<Filter, IsEmpty>>
+Composed all(Predicate pred = Predicate()) {
+  return Composed(Filter(std::move(negate(pred))), IsEmpty());
+}
+
 template<class Seed,
          class Fold,
          class FoldLeft = detail::FoldLeft<Seed, Fold>>
@@ -734,6 +815,12 @@ template<class Exception,
              typename std::decay<ErrorHandler>::type>>
 GuardImpl guard(ErrorHandler&& handler) {
   return GuardImpl(std::forward<ErrorHandler>(handler));
+}
+
+template<class Fallback,
+         class UnwrapOr = detail::UnwrapOr<typename std::decay<Fallback>::type>>
+UnwrapOr unwrapOr(Fallback&& fallback) {
+  return UnwrapOr(std::forward<Fallback>(fallback));
 }
 
 }} // folly::gen

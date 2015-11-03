@@ -30,7 +30,7 @@ spin_lock_test_SOURCES = SpinLockTest.cpp
 spin_lock_test_LDADD = libgtestmain.la $(top_builddir)/libfolly.la
 TESTS += spin_lock_test
 
-if HAVE_X86_64
+if RUN_ARCH_SPECIFIC_TESTS
 small_locks_test_SOURCES = SmallLocksTest.cpp
 small_locks_test_LDADD = libgtestmain.la $(top_builddir)/libfolly.la
 TESTS += small_locks_test
@@ -48,9 +48,11 @@ discriminated_ptr_test_SOURCES = DiscriminatedPtrTest.cpp
 discriminated_ptr_test_LDADD = libgtestmain.la $(top_builddir)/libfolly.la
 TESTS += discriminated_ptr_test
 
+if !HAVE_PPC64
 cpuid_test_SOURCES = CpuIdTest.cpp
 cpuid_test_LDADD = libgtestmain.la $(top_builddir)/libfolly.la
 TESTS += cpuid_test
+endif
 endif
 
 sorted_vector_types_test_SOURCES = sorted_vector_test.cpp
@@ -182,10 +184,20 @@ spooky_hash_v2_test_SOURCES = SpookyHashV2Test.cpp
 spooky_hash_v2_test_LDADD = libgtestmain.la $(top_builddir)/libfolly.la $(top_builddir)/libfollybenchmark.la
 TESTS += spooky_hash_v2_test
 
+token_bucket_test_SOURCES = TokenBucketTest.cpp
+token_bucket_test_LDADD = libgtest.la $(top_builddir)/libfolly.la $(top_builddir)/libfollybenchmark.la
+TESTS += token_bucket_test
+
+thread_name_test_SOURCES = ThreadNameTest.cpp
+thread_name_test_LDADD = ligtest.la $(top_builddir)/libfolly.la
+TESTS += thread_name_test
+
+
 futures_test_SOURCES = \
     ../futures/test/CollectTest.cpp \
     ../futures/test/ContextTest.cpp \
     ../futures/test/CoreTest.cpp \
+    ../futures/test/ThreadedExecutorTest.cpp \
     ../futures/test/EnsureTest.cpp \
     ../futures/test/ExecutorTest.cpp \
     ../futures/test/FSMTest.cpp \
@@ -197,17 +209,21 @@ futures_test_SOURCES = \
     ../futures/test/PollTest.cpp \
     ../futures/test/PromiseTest.cpp \
     ../futures/test/ReduceTest.cpp \
+    ../futures/test/RetryingTest.cpp \
     ../futures/test/SharedPromiseTest.cpp \
     ../futures/test/ThenCompileTest.cpp \
     ../futures/test/ThenTest.cpp \
     ../futures/test/TimekeeperTest.cpp \
+    ../futures/test/TimesTest.cpp \
     ../futures/test/TryTest.cpp \
     ../futures/test/UnitTest.cpp \
     ../futures/test/UnwrapTest.cpp \
     ../futures/test/ViaTest.cpp \
     ../futures/test/WaitTest.cpp \
     ../futures/test/WillEqualTest.cpp \
-    ../futures/test/WindowTest.cpp
+    ../futures/test/WindowTest.cpp \
+    ../futures/test/WhenTest.cpp \
+    ../futures/test/WhileDoTest.cpp
 
 futures_test_LDADD = libgtestmain.la $(top_builddir)/libfolly.la
 TESTS += futures_test

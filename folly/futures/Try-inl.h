@@ -32,6 +32,21 @@ Try<T>::Try(Try<T>&& t) noexcept : contains_(t.contains_) {
 }
 
 template <class T>
+template <class T2>
+Try<T>::Try(typename std::enable_if<std::is_same<Unit, T2>::value,
+                                    Try<void> const&>::type t)
+    : contains_(Contains::NOTHING) {
+  if (t.hasValue()) {
+    contains_ = Contains::VALUE;
+    new (&value_) T();
+  } else if (t.hasException()) {
+    contains_ = Contains::EXCEPTION;
+    new (&e_) std::unique_ptr<exception_wrapper>(
+        folly::make_unique<exception_wrapper>(t.exception()));
+  }
+}
+
+template <class T>
 Try<T>& Try<T>::operator=(Try<T>&& t) noexcept {
   if (this == &t) {
     return *this;
@@ -116,11 +131,11 @@ void Try<void>::throwIfFailed() const {
 }
 
 template <typename T>
-inline T moveFromTry(Try<T>&& t) {
+inline T moveFromTry(Try<T>& t) {
   return std::move(t.value());
 }
 
-inline void moveFromTry(Try<void>&& t) {
+inline void moveFromTry(Try<void>& t) {
   return t.value();
 }
 

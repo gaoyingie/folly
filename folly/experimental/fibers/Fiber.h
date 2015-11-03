@@ -24,6 +24,7 @@
 #include <folly/CPortability.h>
 #include <folly/IntrusiveList.h>
 #include <folly/experimental/fibers/BoostContextCompatibility.h>
+#include <folly/io/async/Request.h>
 #include <folly/Portability.h>
 
 namespace folly { namespace fibers {
@@ -53,6 +54,21 @@ class Fiber {
   Fiber& operator=(const Fiber&) = delete;
 
   ~Fiber();
+
+  /**
+   * Retrieve this fiber's base stack and stack size.
+   *
+   * @return This fiber's stack pointer and stack size.
+   */
+  std::pair<void*, size_t> getStack() const {
+    void* const stack =
+      std::min<void*>(fcontext_.stackLimit(), fcontext_.stackBase());
+    const size_t size = std::abs<intptr_t>(
+        reinterpret_cast<intptr_t>(fcontext_.stackBase()) -
+        reinterpret_cast<intptr_t>(fcontext_.stackLimit()));
+    return { stack, size };
+  }
+
  private:
   enum State {
     INVALID,                    /**< Does't have task function */
@@ -102,6 +118,7 @@ class Fiber {
   FiberManager& fiberManager_;  /**< Associated FiberManager */
   FContext fcontext_;           /**< current task execution context */
   intptr_t data_;               /**< Used to keep some data with the Fiber */
+  std::shared_ptr<RequestContext> rcontext_; /**< current RequestContext */
   std::function<void()> func_;  /**< task function */
   bool recordStackUsed_{false};
   bool stackFilledWithMagic_{false};

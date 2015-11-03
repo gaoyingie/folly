@@ -28,7 +28,7 @@
 
 namespace folly { namespace fibers {
 
-__thread FiberManager* FiberManager::currentFiberManager_ = nullptr;
+FOLLY_TLS FiberManager* FiberManager::currentFiberManager_ = nullptr;
 
 FiberManager::FiberManager(std::unique_ptr<LoopController> loopController,
                            Options options) :
@@ -41,8 +41,6 @@ FiberManager::~FiberManager() {
     loopController_->cancel();
   }
 
-  Fiber* fiberIt;
-  Fiber* fiberItNext;
   while (!fibersPool_.empty()) {
     fibersPool_.pop_front_and_dispose([] (Fiber* fiber) {
       delete fiber;
@@ -68,6 +66,12 @@ bool FiberManager::hasTasks() const {
 
 Fiber* FiberManager::getFiber() {
   Fiber* fiber = nullptr;
+
+  if (options_.fibersPoolResizePeriodMs > 0 && !fibersPoolResizerScheduled_) {
+    fibersPoolResizer_();
+    fibersPoolResizerScheduled_ = true;
+  }
+
   if (fibersPool_.empty()) {
     fiber = new Fiber(*this);
     ++fibersAllocated_;
@@ -78,7 +82,9 @@ Fiber* FiberManager::getFiber() {
     --fibersPoolSize_;
   }
   assert(fiber);
-  ++fibersActive_;
+  if (++fibersActive_ > maxFibersActiveLastPeriod_) {
+    maxFibersActiveLastPeriod_ = fibersActive_;
+  }
   ++fiberId_;
   bool recordStack = (options_.recordStackEvery != 0) &&
                      (fiberId_ % options_.recordStackEvery == 0);
@@ -114,6 +120,28 @@ void FiberManager::remoteReadyInsert(Fiber* fiber) {
 
 void FiberManager::setObserver(ExecutionObserver* observer) {
   observer_ = observer;
+}
+
+void FiberManager::doFibersPoolResizing() {
+  while (fibersAllocated_ > maxFibersActiveLastPeriod_ &&
+         fibersPoolSize_ > options_.maxFibersPoolSize) {
+    auto fiber = &fibersPool_.front();
+    assert(fiber != nullptr);
+    fibersPool_.pop_front();
+    delete fiber;
+    --fibersPoolSize_;
+    --fibersAllocated_;
+  }
+
+  maxFibersActiveLastPeriod_ = fibersActive_;
+}
+
+void FiberManager::FiberManager::FibersPoolResizer::operator()() {
+  fiberManager_.doFibersPoolResizing();
+  fiberManager_.timeoutManager_->registerTimeout(
+      *this,
+      std::chrono::milliseconds(
+        fiberManager_.options_.fibersPoolResizePeriodMs));
 }
 
 }}

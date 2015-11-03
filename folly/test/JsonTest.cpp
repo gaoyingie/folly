@@ -77,7 +77,10 @@ TEST(Json, Parse) {
   // case matters
   EXPECT_THROW(parseJson("infinity"), std::runtime_error);
   EXPECT_THROW(parseJson("inf"), std::runtime_error);
+  EXPECT_THROW(parseJson("Inf"), std::runtime_error);
+  EXPECT_THROW(parseJson("INF"), std::runtime_error);
   EXPECT_THROW(parseJson("nan"), std::runtime_error);
+  EXPECT_THROW(parseJson("NAN"), std::runtime_error);
 
   auto array = parseJson(
     "[12,false, false  , null , [12e4,32, [], 12]]");
@@ -147,6 +150,10 @@ TEST(Json, ParseTrailingComma) {
   EXPECT_THROW(parseJson("{\"a\":1,}", off), std::runtime_error);
 }
 
+TEST(Json, BoolConversion) {
+  EXPECT_TRUE(parseJson("42").asBool());
+}
+
 TEST(Json, JavascriptSafe) {
   auto badDouble = (1ll << 63ll) + 1;
   dynamic badDyn = badDouble;
@@ -169,6 +176,14 @@ TEST(Json, Produce) {
   // We're not allowed to have non-string keys in json.
   EXPECT_THROW(toJson(dynamic::object("abc", "xyz")(42.33, "asd")),
                std::runtime_error);
+
+  // Check Infinity/Nan
+  folly::json::serialization_opts opts;
+  opts.allow_nan_inf = true;
+  EXPECT_EQ("Infinity",
+            folly::json::serialize(parseJson("Infinity"), opts).toStdString());
+  EXPECT_EQ("NaN",
+            folly::json::serialize(parseJson("NaN"), opts).toStdString());
 }
 
 TEST(Json, JsonEscape) {
@@ -344,6 +359,46 @@ TEST(Json, ParseNonStringKeys) {
   // test we can read in doubles
   auto dval = parseJson("{1.5:[]}", opts);
   EXPECT_EQ(1.5, dval.items().begin()->first.asDouble());
+}
+
+TEST(Json, ParseDoubleFallback) {
+  // default behavior
+  EXPECT_THROW(parseJson("{\"a\":847605071342477600000000000000}"),
+      std::range_error);
+  EXPECT_THROW(parseJson("{\"a\":-9223372036854775809}"),
+      std::range_error);
+  EXPECT_THROW(parseJson("{\"a\":9223372036854775808}"),
+      std::range_error);
+  EXPECT_EQ(std::numeric_limits<int64_t>::min(),
+      parseJson("{\"a\":-9223372036854775808}").items().begin()
+        ->second.asInt());
+  EXPECT_EQ(std::numeric_limits<int64_t>::max(),
+      parseJson("{\"a\":9223372036854775807}").items().begin()->second.asInt());
+  // with double_fallback
+  folly::json::serialization_opts opts;
+  opts.double_fallback = true;
+  EXPECT_EQ(847605071342477600000000000000.0,
+      parseJson("{\"a\":847605071342477600000000000000}",
+        opts).items().begin()->second.asDouble());
+  EXPECT_EQ(847605071342477600000000000000.0,
+      parseJson("{\"a\": 847605071342477600000000000000}",
+        opts).items().begin()->second.asDouble());
+  EXPECT_EQ(847605071342477600000000000000.0,
+      parseJson("{\"a\":847605071342477600000000000000 }",
+        opts).items().begin()->second.asDouble());
+  EXPECT_EQ(847605071342477600000000000000.0,
+      parseJson("{\"a\": 847605071342477600000000000000 }",
+        opts).items().begin()->second.asDouble());
+  EXPECT_EQ(std::numeric_limits<int64_t>::min(),
+      parseJson("{\"a\":-9223372036854775808}",
+        opts).items().begin()->second.asInt());
+  EXPECT_EQ(std::numeric_limits<int64_t>::max(),
+      parseJson("{\"a\":9223372036854775807}",
+        opts).items().begin()->second.asInt());
+  // show that some precision gets lost
+  EXPECT_EQ(847605071342477612345678900000.0,
+      parseJson("{\"a\":847605071342477612345678912345}",
+        opts).items().begin()->second.asDouble());
 }
 
 TEST(Json, SortKeys) {

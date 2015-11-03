@@ -44,7 +44,7 @@ class FunctionLoopCallback : public EventBase::LoopCallback {
   explicit FunctionLoopCallback(const Cob& function)
       : function_(function) {}
 
-  virtual void runLoopCallback() noexcept {
+  void runLoopCallback() noexcept override {
     function_();
     delete this;
   }
@@ -66,7 +66,7 @@ const int kNoFD = -1;
 class EventBase::FunctionRunner
     : public NotificationQueue<std::pair<void (*)(void*), void*>>::Consumer {
  public:
-  void messageAvailable(std::pair<void (*)(void*), void*>&& msg) {
+  void messageAvailable(std::pair<void (*)(void*), void*>&& msg) override {
 
     // In libevent2, internal events do not break the loop.
     // Most users would expect loop(), followed by runInEventBaseThread(),
@@ -237,6 +237,19 @@ EventBase::~EventBase() {
     std::lock_guard<std::mutex> lock(libevent_mutex_);
     event_base_free(evb_);
   }
+
+  while (!runAfterDrainCallbacks_.empty()) {
+    LoopCallback* callback = &runAfterDrainCallbacks_.front();
+    runAfterDrainCallbacks_.pop_front();
+    callback->runLoopCallback();
+  }
+
+  {
+    std::lock_guard<std::mutex> lock(localStorageMutex_);
+    for (auto storage : localStorageToDtor_) {
+      storage->onEventBaseDestruction(*this);
+    }
+  }
   VLOG(5) << "EventBase(): Destroyed.";
 }
 
@@ -299,7 +312,7 @@ bool EventBase::loopBody(int flags) {
 
   // time-measurement variables.
   std::chrono::steady_clock::time_point prev;
-  int64_t idleStart;
+  int64_t idleStart = 0;
   int64_t busy;
   int64_t idle;
 
@@ -315,8 +328,7 @@ bool EventBase::loopBody(int flags) {
       std::chrono::steady_clock::now().time_since_epoch()).count();
   }
 
-  // TODO: Read stop_ atomically with an acquire barrier.
-  while (!stop_) {
+  while (!stop_.load(std::memory_order_acquire)) {
     ++nextLoopCnt_;
 
     // Run the before loop callbacks
@@ -447,12 +459,14 @@ bool EventBase::bumpHandlingTime() {
     " (loop) latest " << latestLoopCnt_ << " next " << nextLoopCnt_;
   if(nothingHandledYet()) {
     latestLoopCnt_ = nextLoopCnt_;
-    // set the time
-    startWork_ = std::chrono::duration_cast<std::chrono::microseconds>(
-      std::chrono::steady_clock::now().time_since_epoch()).count();
+    if (enableTimeMeasurement_) {
+      // set the time
+      startWork_ = std::chrono::duration_cast<std::chrono::microseconds>(
+        std::chrono::steady_clock::now().time_since_epoch()).count();
 
-    VLOG(11) << "EventBase " << this << " " << __PRETTY_FUNCTION__ <<
-      " (loop) startWork_ " << startWork_;
+      VLOG(11) << "EventBase " << this << " " << __PRETTY_FUNCTION__ <<
+        " (loop) startWork_ " << startWork_;
+    }
     return true;
   }
   return false;
@@ -518,6 +532,13 @@ void EventBase::runInLoop(Cob&& cob, bool thisIteration) {
   } else {
     loopCallbacks_.push_back(*wrapper);
   }
+}
+
+void EventBase::runAfterDrain(Cob&& cob) {
+  auto callback = new FunctionLoopCallback<Cob>(std::move(cob));
+  std::lock_guard<std::mutex> lg(runAfterDrainCallbacksMutex_);
+  callback->cancelLoopCallback();
+  runAfterDrainCallbacks_.push_back(*callback);
 }
 
 void EventBase::runOnDestruction(LoopCallback* callback) {
@@ -774,7 +795,7 @@ void EventBase::attachTimeoutManager(AsyncTimeout* obj,
   event_base_set(getLibeventBase(), ev);
   if (internal == AsyncTimeout::InternalEnum::INTERNAL) {
     // Set the EVLIST_INTERNAL flag
-    ev->ev_flags |= EVLIST_INTERNAL;
+    event_ref_flags(ev) |= EVLIST_INTERNAL;
   }
 }
 

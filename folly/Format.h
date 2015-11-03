@@ -17,22 +17,14 @@
 #ifndef FOLLY_FORMAT_H_
 #define FOLLY_FORMAT_H_
 
-#include <array>
 #include <cstdio>
 #include <tuple>
 #include <type_traits>
-#include <vector>
-#include <deque>
-#include <map>
-#include <unordered_map>
 
-#include <folly/FBVector.h>
 #include <folly/Conv.h>
 #include <folly/Range.h>
 #include <folly/Traits.h>
-#include <folly/Likely.h>
 #include <folly/String.h>
-#include <folly/small_vector.h>
 #include <folly/FormatArg.h>
 
 // Ignore shadowing warnings within this file, so includers can use -Wshadow.
@@ -116,7 +108,7 @@ class BaseFormatter {
 
   template <size_t K, class Callback>
   typename std::enable_if<K == valueCount>::type
-  doFormatFrom(size_t i, FormatArg& arg, Callback& cb) const {
+  doFormatFrom(size_t i, FormatArg& arg, Callback& /*cb*/) const {
     arg.error("argument index out of range, max=", i);
   }
 
@@ -133,6 +125,39 @@ class BaseFormatter {
   template <class Callback>
   void doFormat(size_t i, FormatArg& arg, Callback& cb) const {
     return doFormatFrom<0>(i, arg, cb);
+  }
+
+  template <size_t K>
+  typename std::enable_if<K == valueCount, int>::type
+  getSizeArgFrom(size_t i, const FormatArg& arg) const {
+    arg.error("argument index out of range, max=", i);
+  }
+
+  template <class T>
+  typename std::enable_if<std::is_integral<T>::value &&
+                          !std::is_same<T, bool>::value, int>::type
+  getValue(const FormatValue<T>& format, const FormatArg&) const {
+    return static_cast<int>(format.getValue());
+  }
+
+  template <class T>
+  typename std::enable_if<!std::is_integral<T>::value ||
+                          std::is_same<T, bool>::value, int>::type
+  getValue(const FormatValue<T>&, const FormatArg& arg) const {
+    arg.error("dynamic field width argument must be integral");
+  }
+
+  template <size_t K>
+  typename std::enable_if<K < valueCount, int>::type
+  getSizeArgFrom(size_t i, const FormatArg& arg) const {
+    if (i == K) {
+      return getValue(std::get<K>(values_), arg);
+    }
+    return getSizeArgFrom<K+1>(i, arg);
+  }
+
+  int getSizeArg(size_t i, const FormatArg& arg) const {
+    return getSizeArgFrom<0>(i, arg);
   }
 
   StringPiece str_;

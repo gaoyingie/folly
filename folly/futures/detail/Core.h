@@ -22,7 +22,7 @@
 #include <vector>
 
 #include <folly/Optional.h>
-#include <folly/SmallLocks.h>
+#include <folly/MicroSpinLock.h>
 
 #include <folly/futures/Try.h>
 #include <folly/futures/Promise.h>
@@ -74,11 +74,13 @@ enum class State : uint8_t {
 /// time there won't be any problems.
 template<typename T>
 class Core {
+  static_assert(!std::is_void<T>::value,
+                "void futures are not supported. Use Unit instead.");
  public:
   /// This must be heap-constructed. There's probably a way to enforce that in
   /// code but since this is just internal detail code and I don't know how
   /// off-hand, I'm punting.
-  Core() {}
+  Core() : result_(), fsm_(State::Start), attached_(2) {}
 
   explicit Core(Try<T>&& t)
     : result_(std::move(t)),
@@ -128,7 +130,8 @@ class Core {
   template <typename F>
   class LambdaBufHelper {
    public:
-    explicit LambdaBufHelper(F&& func) : func_(std::forward<F>(func)) {}
+    template <typename FF>
+    explicit LambdaBufHelper(FF&& func) : func_(std::forward<FF>(func)) {}
     void operator()(Try<T>&& t) {
       SCOPE_EXIT { this->~LambdaBufHelper(); };
       func_(std::move(t));
@@ -146,7 +149,7 @@ class Core {
 
       // Move the lambda into the Core if it fits
       if (sizeof(LambdaBufHelper<F>) <= lambdaBufSize) {
-        auto funcLoc = static_cast<LambdaBufHelper<F>*>((void*)lambdaBuf_);
+        auto funcLoc = reinterpret_cast<LambdaBufHelper<F>*>(&lambdaBuf_);
         new (funcLoc) LambdaBufHelper<F>(std::forward<F>(func));
         callback_ = std::ref(*funcLoc);
       } else {
@@ -313,8 +316,6 @@ class Core {
   }
 
   void doCallback() {
-    RequestContext::setContext(context_);
-
     Executor* x = executor_;
     int8_t priority;
     if (x) {
@@ -333,19 +334,24 @@ class Core {
         if (LIKELY(x->getNumPriorities() == 1)) {
           x->add([this]() mutable {
             SCOPE_EXIT { detachOne(); };
+            RequestContext::setContext(context_);
             callback_(std::move(*result_));
           });
         } else {
           x->addWithPriority([this]() mutable {
             SCOPE_EXIT { detachOne(); };
+            RequestContext::setContext(context_);
             callback_(std::move(*result_));
           }, priority);
         }
       } catch (...) {
+        --attached_; // Account for extra ++attached_ before try
+        RequestContext::setContext(context_);
         result_ = Try<T>(exception_wrapper(std::current_exception()));
         callback_(std::move(*result_));
       }
     } else {
+      RequestContext::setContext(context_);
       callback_(std::move(*result_));
     }
   }
@@ -361,13 +367,13 @@ class Core {
 
   // lambdaBuf occupies exactly one cache line
   static constexpr size_t lambdaBufSize = 8 * sizeof(void*);
-  char lambdaBuf_[lambdaBufSize];
+  typename std::aligned_storage<lambdaBufSize>::type lambdaBuf_;
   // place result_ next to increase the likelihood that the value will be
   // contained entirely in one cache line
-  folly::Optional<Try<T>> result_ {};
+  folly::Optional<Try<T>> result_;
   std::function<void(Try<T>&&)> callback_ {nullptr};
-  FSM<State> fsm_ {State::Start};
-  std::atomic<unsigned char> attached_ {2};
+  FSM<State> fsm_;
+  std::atomic<unsigned char> attached_;
   std::atomic<bool> active_ {true};
   std::atomic<bool> interruptHandlerSet_ {false};
   folly::MicroSpinLock interruptLock_ {0};
@@ -414,7 +420,7 @@ struct CollectVariadicContext {
   }
   Promise<std::tuple<Ts...>> p;
   std::tuple<Ts...> results;
-  std::atomic<bool> threw;
+  std::atomic<bool> threw {false};
   typedef Future<std::tuple<Ts...>> type;
 };
 

@@ -24,8 +24,8 @@
 #include <vector>
 
 #include <folly/Optional.h>
+#include <folly/Portability.h>
 #include <folly/MoveWrapper.h>
-#include <folly/futures/Deprecated.h>
 #include <folly/futures/DrivableExecutor.h>
 #include <folly/futures/Promise.h>
 #include <folly/futures/Try.h>
@@ -62,7 +62,7 @@ class Future {
 
   template <class T2 = T, typename =
             typename std::enable_if<
-              folly::is_void_or_unit<T2>::value>::type>
+              std::is_same<Unit, T2>::value>::type>
   Future();
 
   ~Future();
@@ -165,10 +165,6 @@ class Future {
     value(), which may rethrow if this has captured an exception. If func
     throws, the exception will be captured in the Future that is returned.
     */
-  /* TODO n3428 and other async frameworks have something like then(scheduler,
-     Future), we might want to support a similar API which could be
-     implemented a little more efficiently than
-     f.via(executor).then(callback) */
   template <typename F, typename R = detail::callableResult<T, F>>
   typename R::Return then(F func) {
     typedef typename R::Arg Arguments;
@@ -206,9 +202,9 @@ class Future {
     -> decltype(this->then(std::forward<Arg>(arg),
                            std::forward<Args>(args)...));
 
-  /// Convenience method for ignoring the value and creating a Future<void>.
+  /// Convenience method for ignoring the value and creating a Future<Unit>.
   /// Exceptions still propagate.
-  Future<void> then();
+  Future<Unit> then();
 
   /// Set an error callback for this Future. The callback should take a single
   /// argument of the type that you want to catch, and should return a value of
@@ -291,19 +287,19 @@ class Future {
   /// by then), and it is active (active by default).
   ///
   /// Inactive Futures will activate upon destruction.
-  Future<T>& activate() & DEPRECATED {
+  FOLLY_DEPRECATED("do not use") Future<T>& activate() & {
     core_->activate();
     return *this;
   }
-  Future<T>& deactivate() & DEPRECATED {
+  FOLLY_DEPRECATED("do not use") Future<T>& deactivate() & {
     core_->deactivate();
     return *this;
   }
-  Future<T> activate() && DEPRECATED {
+  FOLLY_DEPRECATED("do not use") Future<T> activate() && {
     core_->activate();
     return std::move(*this);
   }
-  Future<T> deactivate() && DEPRECATED {
+  FOLLY_DEPRECATED("do not use") Future<T> deactivate() && {
     core_->deactivate();
     return std::move(*this);
   }
@@ -444,6 +440,29 @@ class Future {
 
   template <class T2>
   friend Future<T2> makeFuture(Try<T2>&&);
+
+  /// Repeat the given future (i.e., the computation it contains)
+  /// n times.
+  ///
+  /// thunk behaves like std::function<Future<T2>(void)>
+  template <class F>
+  friend Future<Unit> times(const int n, F thunk);
+
+  /// Carry out the computation contained in the given future if
+  /// the predicate holds.
+  ///
+  /// thunk behaves like std::function<Future<T2>(void)>
+  template <class F>
+  friend Future<Unit> when(bool p, F thunk);
+
+  /// Carry out the computation contained in the given future if
+  /// while the predicate continues to hold.
+  ///
+  /// thunk behaves like std::function<Future<T2>(void)>
+  ///
+  /// predicate behaves like std::function<bool(void)>
+  template <class P, class F>
+  friend Future<Unit> whileDo(P predicate, F thunk);
 
   // Variant: returns a value
   // e.g. f.then([](Try<T> t){ return t.value(); });

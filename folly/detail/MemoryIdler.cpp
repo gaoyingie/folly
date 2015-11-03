@@ -34,14 +34,14 @@ AtomicStruct<std::chrono::steady_clock::duration>
 MemoryIdler::defaultIdleTimeout(std::chrono::seconds(5));
 
 
-/// Calls mallctl, optionally reading and/or writing an unsigned value
-/// if in and/or out is non-null.  Logs on error
-static unsigned mallctlWrapper(const char* cmd, const unsigned* in,
-                               unsigned* out) {
-  size_t outLen = sizeof(unsigned);
+// Calls mallctl, optionally reading a value of type <T> if out is
+// non-null.  Logs on error.
+template <typename T>
+static int mallctlRead(const char* cmd, T* out) {
+  size_t outLen = sizeof(T);
   int err = mallctl(cmd,
                     out, out ? &outLen : nullptr,
-                    const_cast<unsigned*>(in), in ? sizeof(unsigned) : 0);
+                    nullptr, 0);
   if (err != 0) {
     FB_LOG_EVERY_MS(WARNING, 10000)
       << "mallctl " << cmd << ": " << strerror(err) << " (" << err << ")";
@@ -49,15 +49,20 @@ static unsigned mallctlWrapper(const char* cmd, const unsigned* in,
   return err;
 }
 
+static int mallctlCall(const char* cmd) {
+  // Use <unsigned> rather than <void> to avoid sizeof(void).
+  return mallctlRead<unsigned>(cmd, nullptr);
+}
+
 void MemoryIdler::flushLocalMallocCaches() {
   if (usingJEMalloc()) {
-    if (!mallctl) {
-      FB_LOG_EVERY_MS(ERROR, 10000) << "mallctl weak link failed";
+    if (!mallctl || !mallctlnametomib || !mallctlbymib) {
+      FB_LOG_EVERY_MS(ERROR, 10000) << "mallctl* weak link failed";
       return;
     }
 
     // "tcache.flush" was renamed to "thread.tcache.flush" in jemalloc 3
-    (void)mallctlWrapper("thread.tcache.flush", nullptr, nullptr);
+    mallctlCall("thread.tcache.flush");
 
     // By default jemalloc has 4 arenas per cpu, and then assigns each
     // thread to one of those arenas.  This means that in any service
@@ -69,12 +74,16 @@ void MemoryIdler::flushLocalMallocCaches() {
     // purging the arenas is counter-productive.  We use the heuristic
     // that if narenas <= 2 * num_cpus then we shouldn't do anything here,
     // which detects when the narenas has been reduced from the default
-    unsigned narenas;
+    size_t narenas;
     unsigned arenaForCurrent;
-    if (mallctlWrapper("arenas.narenas", nullptr, &narenas) == 0 &&
+    size_t mib[3];
+    size_t miblen = 3;
+    if (mallctlRead<size_t>("opt.narenas", &narenas) == 0 &&
         narenas > 2 * CacheLocality::system().numCpus &&
-        mallctlWrapper("thread.arena", nullptr, &arenaForCurrent) == 0) {
-      (void)mallctlWrapper("arenas.purge", &arenaForCurrent, nullptr);
+        mallctlRead<unsigned>("thread.arena", &arenaForCurrent) == 0 &&
+        mallctlnametomib("arena.0.purge", mib, &miblen) == 0) {
+      mib[1] = size_t(arenaForCurrent);
+      mallctlbymib(mib, miblen, nullptr, nullptr, nullptr, 0);
     }
   }
 }
@@ -83,11 +92,15 @@ void MemoryIdler::flushLocalMallocCaches() {
 // Stack madvise isn't Linux or glibc specific, but the system calls
 // and arithmetic (and bug compatibility) are not portable.  The set of
 // platforms could be increased if it was useful.
-#if FOLLY_X64 && defined(_GNU_SOURCE) && defined(__linux__)
+#if (FOLLY_X64 || FOLLY_PPC64 ) && defined(_GNU_SOURCE) && defined(__linux__)
 
-static const size_t s_pageSize = sysconf(_SC_PAGESIZE);
 static FOLLY_TLS uintptr_t tls_stackLimit;
 static FOLLY_TLS size_t tls_stackSize;
+
+static size_t pageSize() {
+  static const size_t s_pageSize = sysconf(_SC_PAGESIZE);
+  return s_pageSize;
+}
 
 static void fetchStackLimits() {
   pthread_attr_t attr;
@@ -119,7 +132,7 @@ static void fetchStackLimits() {
   tls_stackLimit = uintptr_t(addr) + guardSize;
   tls_stackSize = rawSize - guardSize;
 
-  assert((tls_stackLimit & (s_pageSize - 1)) == 0);
+  assert((tls_stackLimit & (pageSize() - 1)) == 0);
 }
 
 FOLLY_NOINLINE static uintptr_t getStackPtr() {
@@ -141,14 +154,14 @@ void MemoryIdler::unmapUnusedStack(size_t retain) {
   assert(sp >= tls_stackLimit);
   assert(sp - tls_stackLimit < tls_stackSize);
 
-  auto end = (sp - retain) & ~(s_pageSize - 1);
+  auto end = (sp - retain) & ~(pageSize() - 1);
   if (end <= tls_stackLimit) {
     // no pages are eligible for unmapping
     return;
   }
 
   size_t len = end - tls_stackLimit;
-  assert((len & (s_pageSize - 1)) == 0);
+  assert((len & (pageSize() - 1)) == 0);
   if (madvise((void*)tls_stackLimit, len, MADV_DONTNEED) != 0) {
     // It is likely that the stack vma hasn't been fully grown.  In this
     // case madvise will apply dontneed to the present vmas, then return

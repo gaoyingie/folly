@@ -18,7 +18,14 @@
 #error This file may only be included from Format.h.
 #endif
 
+#include <array>
+#include <deque>
+#include <map>
+#include <unordered_map>
+#include <vector>
+
 #include <folly/Exception.h>
+#include <folly/FormatTraits.h>
 #include <folly/Traits.h>
 
 // Ignore -Wformat-nonliteral warnings within this file
@@ -218,6 +225,8 @@ void BaseFormatter<Derived, containerMode, Args...>::operator()(Output& out)
     int argIndex = 0;
     auto piece = arg.splitKey<true>();  // empty key component is okay
     if (containerMode) {  // static
+      arg.enforce(arg.width != FormatArg::kDynamicWidth,
+                  "dynamic field width not supported in vformat()");
       if (piece.empty()) {
         arg.setNextIntKey(nextArg++);
         hasDefaultArgIndex = true;
@@ -227,9 +236,22 @@ void BaseFormatter<Derived, containerMode, Args...>::operator()(Output& out)
       }
     } else {
       if (piece.empty()) {
+        if (arg.width == FormatArg::kDynamicWidth) {
+          arg.enforce(arg.widthIndex == FormatArg::kNoIndex,
+                      "cannot provide width arg index without value arg index");
+          int sizeArg = nextArg++;
+          arg.width = getSizeArg(sizeArg, arg);
+        }
+
         argIndex = nextArg++;
         hasDefaultArgIndex = true;
       } else {
+        if (arg.width == FormatArg::kDynamicWidth) {
+          arg.enforce(arg.widthIndex != FormatArg::kNoIndex,
+                      "cannot provide value arg index without width arg index");
+          arg.width = getSizeArg(arg.widthIndex, arg);
+        }
+
         try {
           argIndex = to<int>(piece);
         } catch (const std::out_of_range& e) {
@@ -395,6 +417,11 @@ class FormatValue<
   {
  public:
   explicit FormatValue(T val) : val_(val) { }
+
+  T getValue() const {
+    return val_;
+  }
+
   template <class FormatCallback>
   void format(FormatArg& arg, FormatCallback& cb) const {
     arg.validate(FormatArg::Type::INTEGER);
@@ -463,8 +490,21 @@ class FormatValue<
                   "' specifier");
 
       valBufBegin = valBuf + 3;  // room for sign and base prefix
+#ifdef _MSC_VER
+      char valBuf2[valBufSize];
+      snprintf(valBuf2, valBufSize, "%ju", static_cast<uintmax_t>(uval));
+      int len = GetNumberFormat(
+        LOCALE_USER_DEFAULT,
+        0,
+        valBuf2,
+        nullptr,
+        valBufBegin,
+        (int)((valBuf + valBufSize) - valBufBegin)
+      );
+#else
       int len = snprintf(valBufBegin, (valBuf + valBufSize) - valBufBegin,
                          "%'ju", static_cast<uintmax_t>(uval));
+#endif
       // valBufSize should always be big enough, so this should never
       // happen.
       assert(len < valBuf + valBufSize - valBufBegin);
@@ -770,45 +810,6 @@ class FormatValue<
 
 namespace detail {
 
-// Shortcut, so we don't have to use enable_if everywhere
-struct FormatTraitsBase {
-  typedef void enabled;
-};
-
-// Traits that define enabled, value_type, and at() for anything
-// indexable with integral keys: pointers, arrays, vectors, and maps
-// with integral keys
-template <class T, class Enable=void> struct IndexableTraits;
-
-// Base class for sequences (vectors, deques)
-template <class C>
-struct IndexableTraitsSeq : public FormatTraitsBase {
-  typedef C container_type;
-  typedef typename C::value_type value_type;
-  static const value_type& at(const C& c, int idx) {
-    return c.at(idx);
-  }
-
-  static const value_type& at(const C& c, int idx,
-                              const value_type& dflt) {
-    return (idx >= 0 && size_t(idx) < c.size()) ? c.at(idx) : dflt;
-  }
-};
-
-// Base class for associative types (maps)
-template <class C>
-struct IndexableTraitsAssoc : public FormatTraitsBase {
-  typedef typename C::value_type::second_type value_type;
-  static const value_type& at(const C& c, int idx) {
-    return c.at(static_cast<typename C::key_type>(idx));
-  }
-  static const value_type& at(const C& c, int idx,
-                              const value_type& dflt) {
-    auto pos = c.find(static_cast<typename C::key_type>(idx));
-    return pos != c.end() ? pos->second : dflt;
-  }
-};
-
 // std::array
 template <class T, size_t N>
 struct IndexableTraits<std::array<T, N>>
@@ -825,18 +826,6 @@ struct IndexableTraits<std::vector<T, A>>
 template <class T, class A>
 struct IndexableTraits<std::deque<T, A>>
   : public IndexableTraitsSeq<std::deque<T, A>> {
-};
-
-// fbvector
-template <class T, class A>
-struct IndexableTraits<fbvector<T, A>>
-  : public IndexableTraitsSeq<fbvector<T, A>> {
-};
-
-// small_vector
-template <class T, size_t M, class A, class B, class C>
-struct IndexableTraits<small_vector<T, M, A, B, C>>
-  : public IndexableTraitsSeq<small_vector<T, M, A, B, C>> {
 };
 
 // std::map with integral keys

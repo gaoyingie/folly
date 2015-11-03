@@ -23,6 +23,16 @@
 #include <folly/io/async/EventBase.h>
 #include <folly/io/async/AsyncSocketBase.h>
 
+#include <openssl/ssl.h>
+
+constexpr bool kOpenSslModeMoveBufferOwnership =
+#ifdef SSL_MODE_MOVE_BUFFER_OWNERSHIP
+  true
+#else
+  false
+#endif
+;
+
 namespace folly {
 
 class AsyncSocketException;
@@ -46,6 +56,10 @@ enum class WriteFlags : uint32_t {
    * will be acknowledged.
    */
   EOR = 0x02,
+  /*
+   * this indicates that only the write side of socket should be shutdown
+   */
+  WRITE_SHUTDOWN = 0x04,
 };
 
 /*
@@ -216,6 +230,7 @@ class AsyncTransport : public DelayedDestruction, public AsyncSocketBase {
   virtual bool isPending() const {
     return readable();
   }
+
   /**
    * Determine if transport is connected to the endpoint
    *
@@ -321,12 +336,8 @@ class AsyncTransport : public DelayedDestruction, public AsyncSocketBase {
   virtual ~AsyncTransport() = default;
 };
 
-// Transitional intermediate interface. This is deprecated.
-// Wrapper around folly::AsyncTransport, that includes read/write callbacks
-class AsyncTransportWrapper : virtual public AsyncTransport {
+class AsyncReader {
  public:
-  typedef std::unique_ptr<AsyncTransportWrapper, Destructor> UniquePtr;
-
   class ReadCallback {
    public:
     virtual ~ReadCallback() = default;
@@ -376,7 +387,52 @@ class AsyncTransportWrapper : virtual public AsyncTransport {
      *
      * @param len       The number of bytes placed in the buffer.
      */
+
     virtual void readDataAvailable(size_t len) noexcept = 0;
+
+    /**
+     * When data becomes available, isBufferMovable() will be invoked to figure
+     * out which API will be used, readBufferAvailable() or
+     * readDataAvailable(). If isBufferMovable() returns true, that means
+     * ReadCallback supports the IOBuf ownership transfer and
+     * readBufferAvailable() will be used.  Otherwise, not.
+
+     * By default, isBufferMovable() always return false. If
+     * readBufferAvailable() is implemented and to be invoked, You should
+     * overwrite isBufferMovable() and return true in the inherited class.
+     *
+     * This method allows the AsyncSocket/AsyncSSLSocket do buffer allocation by
+     * itself until data becomes available.  Compared with the pre/post buffer
+     * allocation in getReadBuffer()/readDataAvailabe(), readBufferAvailable()
+     * has two advantages.  First, this can avoid memcpy. E.g., in
+     * AsyncSSLSocket, the decrypted data was copied from the openssl internal
+     * buffer to the readbuf buffer.  With the buffer ownership transfer, the
+     * internal buffer can be directly "moved" to ReadCallback. Second, the
+     * memory allocation can be more precise.  The reason is
+     * AsyncSocket/AsyncSSLSocket can allocate the memory of precise size
+     * because they have more context about the available data than
+     * ReadCallback.  Think about the getReadBuffer() pre-allocate 4072 bytes
+     * buffer, but the available data is always 16KB (max OpenSSL record size).
+     */
+
+    virtual bool isBufferMovable() noexcept {
+      return false;
+    }
+
+    /**
+     * readBufferAvailable() will be invoked when data has been successfully
+     * read.
+     *
+     * Note that only either readBufferAvailable() or readDataAvailable() will
+     * be invoked according to the return value of isBufferMovable(). The timing
+     * and aftereffect of readBufferAvailable() are the same as
+     * readDataAvailable()
+     *
+     * @param readBuf The unique pointer of read buffer.
+     */
+
+    virtual void readBufferAvailable(std::unique_ptr<IOBuf> /*readBuf*/)
+      noexcept {};
 
     /**
      * readEOF() will be invoked when the transport is closed.
@@ -398,6 +454,16 @@ class AsyncTransportWrapper : virtual public AsyncTransport {
     virtual void readErr(const AsyncSocketException& ex) noexcept = 0;
   };
 
+  // Read methods that aren't part of AsyncTransport.
+  virtual void setReadCB(ReadCallback* callback) = 0;
+  virtual ReadCallback* getReadCallback() const = 0;
+
+ protected:
+  virtual ~AsyncReader() = default;
+};
+
+class AsyncWriter {
+ public:
   class WriteCallback {
    public:
     virtual ~WriteCallback() = default;
@@ -425,10 +491,7 @@ class AsyncTransportWrapper : virtual public AsyncTransport {
                           const AsyncSocketException& ex) noexcept = 0;
   };
 
-  // Read/write methods that aren't part of AsyncTransport
-  virtual void setReadCB(ReadCallback* callback) = 0;
-  virtual ReadCallback* getReadCallback() const = 0;
-
+  // Write methods that aren't part of AsyncTransport
   virtual void write(WriteCallback* callback, const void* buf, size_t bytes,
                      WriteFlags flags = WriteFlags::NONE) = 0;
   virtual void writev(WriteCallback* callback, const iovec* vec, size_t count,
@@ -436,6 +499,32 @@ class AsyncTransportWrapper : virtual public AsyncTransport {
   virtual void writeChain(WriteCallback* callback,
                           std::unique_ptr<IOBuf>&& buf,
                           WriteFlags flags = WriteFlags::NONE) = 0;
+
+ protected:
+  virtual ~AsyncWriter() = default;
+};
+
+// Transitional intermediate interface. This is deprecated.
+// Wrapper around folly::AsyncTransport, that includes read/write callbacks
+class AsyncTransportWrapper : virtual public AsyncTransport,
+                              virtual public AsyncReader,
+                              virtual public AsyncWriter {
+ public:
+  using UniquePtr = std::unique_ptr<AsyncTransportWrapper, Destructor>;
+
+  // Alias for inherited members from AsyncReader and AsyncWriter
+  // to keep compatibility.
+  using ReadCallback    = AsyncReader::ReadCallback;
+  using WriteCallback   = AsyncWriter::WriteCallback;
+  virtual void setReadCB(ReadCallback* callback) override = 0;
+  virtual ReadCallback* getReadCallback() const override = 0;
+  virtual void write(WriteCallback* callback, const void* buf, size_t bytes,
+                     WriteFlags flags = WriteFlags::NONE) override = 0;
+  virtual void writev(WriteCallback* callback, const iovec* vec, size_t count,
+                      WriteFlags flags = WriteFlags::NONE) override = 0;
+  virtual void writeChain(WriteCallback* callback,
+                          std::unique_ptr<IOBuf>&& buf,
+                          WriteFlags flags = WriteFlags::NONE) override = 0;
 };
 
 } // folly

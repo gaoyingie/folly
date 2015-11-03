@@ -53,9 +53,9 @@
 // namespace {
 // struct Tag1 {};
 // struct Tag2 {};
-// folly::Singleton<MyExpensiveService> s_default();
-// folly::Singleton<MyExpensiveService, Tag1> s1();
-// folly::Singleton<MyExpensiveService, Tag2> s2();
+// folly::Singleton<MyExpensiveService> s_default;
+// folly::Singleton<MyExpensiveService, Tag1> s1;
+// folly::Singleton<MyExpensiveService, Tag2> s2;
 // }
 // ...
 // MyExpensiveService* svc_default = s_default.get();
@@ -70,6 +70,25 @@
 //
 // Where create and destroy are functions, Singleton<T>::CreateFunc
 // Singleton<T>::TeardownFunc.
+//
+// The above examples detail a situation where an expensive singleton is loaded
+// on-demand (thus only if needed).  However if there is an expensive singleton
+// that will likely be needed, and initialization takes a potentially long time,
+// e.g. while initializing, parsing some files, talking to remote services,
+// making uses of other singletons, and so on, the initialization of those can
+// be scheduled up front, or "eagerly".
+//
+// In that case the singleton can be declared this way:
+//
+// namespace {
+// auto the_singleton =
+//     folly::Singleton<MyExpensiveService>(/* optional create, destroy args */)
+//     .shouldEagerInit();
+// }
+//
+// This way the singleton's instance is built at program initialization,
+// if the program opted-in to that feature by calling "doEagerInit" or
+// "doEagerInitVia" during its startup.
 //
 // What if you need to destroy all of your singletons?  Say, some of
 // your singletons manage threads, but you need to fork?  Or your unit
@@ -89,20 +108,29 @@
 #include <folly/Memory.h>
 #include <folly/RWSpinLock.h>
 #include <folly/Demangle.h>
+#include <folly/Executor.h>
 #include <folly/io/async/Request.h>
 
 #include <algorithm>
-#include <vector>
-#include <mutex>
-#include <thread>
+#include <atomic>
 #include <condition_variable>
-#include <string>
-#include <unordered_map>
 #include <functional>
-#include <typeinfo>
+#include <memory>
+#include <mutex>
+#include <string>
+#include <thread>
 #include <typeindex>
+#include <typeinfo>
+#include <unordered_map>
+#include <unordered_set>
+#include <vector>
 
 #include <glog/logging.h>
+
+// use this guard to handleSingleton breaking change in 3rd party code
+#ifndef FOLLY_SINGLETON_TRY_GET
+#define FOLLY_SINGLETON_TRY_GET
+#endif
 
 namespace folly {
 
@@ -117,8 +145,9 @@ namespace folly {
 //
 // A vault goes through a few stages of life:
 //
-//   1. Registration phase; singletons can be registered, but no
-//      singleton can be created.
+//   1. Registration phase; singletons can be registered:
+//      a) Strict: no singleton can be created in this stage.
+//      b) Relaxed: singleton can be created (the default vault is Relaxed).
 //   2. registrationComplete() has been called; singletons can no
 //      longer be registered, but they can be created.
 //   3. A vault can return to stage 1 when destroyInstances is called.
@@ -192,6 +221,8 @@ class SingletonHolderBase {
 
   virtual TypeDescriptor type() = 0;
   virtual bool hasLiveInstance() = 0;
+  virtual void createInstance() = 0;
+  virtual bool creationStarted() = 0;
   virtual void destroyInstance() = 0;
 
  protected:
@@ -212,17 +243,18 @@ struct SingletonHolder : public SingletonHolderBase {
 
   inline T* get();
   inline std::weak_ptr<T> get_weak();
+  inline std::shared_ptr<T> try_get();
 
   void registerSingleton(CreateFunc c, TeardownFunc t);
   void registerSingletonMock(CreateFunc c, TeardownFunc t);
-  virtual TypeDescriptor type();
-  virtual bool hasLiveInstance();
-  virtual void destroyInstance();
+  virtual TypeDescriptor type() override;
+  virtual bool hasLiveInstance() override;
+  virtual void createInstance() override;
+  virtual bool creationStarted() override;
+  virtual void destroyInstance() override;
 
  private:
   SingletonHolder(TypeDescriptor type, SingletonVault& vault);
-
-  void createInstance();
 
   enum class SingletonHolderState {
     NotRegistered,
@@ -241,7 +273,7 @@ struct SingletonHolder : public SingletonHolderBase {
   std::atomic<SingletonHolderState> state_{SingletonHolderState::NotRegistered};
 
   // the thread creating the singleton (only valid while creating an object)
-  std::thread::id creating_thread_;
+  std::atomic<std::thread::id> creating_thread_;
 
   // The singleton itself and related functions.
 
@@ -271,7 +303,10 @@ struct SingletonHolder : public SingletonHolderBase {
 
 class SingletonVault {
  public:
-  enum class Type { Strict, Relaxed };
+  enum class Type {
+    Strict, // Singletons can't be created before registrationComplete()
+    Relaxed, // Singletons can be created before registrationComplete()
+  };
 
   explicit SingletonVault(Type type = Type::Relaxed) : type_(type) {}
 
@@ -285,45 +320,46 @@ class SingletonVault {
   // registration is not complete. If validations succeeds,
   // register a singleton of a given type with the create and teardown
   // functions.
-  void registerSingleton(detail::SingletonHolderBase* entry) {
-    RWSpinLock::ReadHolder rh(&stateMutex_);
+  void registerSingleton(detail::SingletonHolderBase* entry);
 
-    stateCheck(SingletonVaultState::Running);
-
-    if (UNLIKELY(registrationComplete_)) {
-      throw std::logic_error(
-        "Registering singleton after registrationComplete().");
-    }
-
-    RWSpinLock::ReadHolder rhMutex(&mutex_);
-    CHECK_THROW(singletons_.find(entry->type()) == singletons_.end(),
-                std::logic_error);
-
-    RWSpinLock::UpgradedHolder wh(&mutex_);
-    singletons_[entry->type()] = entry;
-  }
+  /**
+   * Called by `Singleton<T>.shouldEagerInit()` to ensure the instance
+   * is built when `doEagerInit[Via]` is called; see those methods
+   * for more info.
+   */
+  void addEagerInitSingleton(detail::SingletonHolderBase* entry);
 
   // Mark registration is complete; no more singletons can be
   // registered at this point.
-  void registrationComplete() {
-    RequestContext::saveContext();
-    std::atexit([](){ SingletonVault::singleton()->destroyInstances(); });
+  void registrationComplete();
 
-    RWSpinLock::WriteHolder wh(&stateMutex_);
+  /**
+   * Initialize all singletons which were marked as eager-initialized
+   * (using `shouldEagerInit()`).  No return value.  Propagates exceptions
+   * from constructors / create functions, as is the usual case when calling
+   * for example `Singleton<Foo>::get_weak()`.
+   */
+  void doEagerInit();
 
-    stateCheck(SingletonVaultState::Running);
-
-    if (type_ == Type::Strict) {
-      for (const auto& p: singletons_) {
-        if (p.second->hasLiveInstance()) {
-          throw std::runtime_error(
-            "Singleton created before registration was complete.");
-        }
-      }
-    }
-
-    registrationComplete_ = true;
-  }
+  /**
+   * Schedule eager singletons' initializations through the given executor.
+   * If baton ptr is not null, its `post` method is called after all
+   * early initialization has completed.
+   *
+   * If exceptions are thrown during initialization, this method will still
+   * `post` the baton to indicate completion.  The exception will not propagate
+   * and future attempts to `try_get` or `get_weak` the failed singleton will
+   * retry initialization.
+   *
+   * Sample usage:
+   *
+   *   wangle::IOThreadPoolExecutor executor(max_concurrency_level);
+   *   folly::Baton<> done;
+   *   doEagerInitVia(executor, &done);
+   *   done.wait();  // or 'timed_wait', or spin with 'try_wait'
+   *
+   */
+  void doEagerInitVia(Executor& exe, folly::Baton<>* done = nullptr);
 
   // Destroy all singletons; when complete, the vault can't create
   // singletons once again until reenableInstances() is called.
@@ -338,6 +374,12 @@ class SingletonVault {
 
     return singletons_.size();
   }
+
+  /**
+   * Flips to true if eager initialization was used, and has completed.
+   * Never set to true if "doEagerInit()" or "doEagerInitVia" never called.
+   */
+  bool eagerInitComplete() const;
 
   size_t livingSingletonCount() const {
     RWSpinLock::ReadHolder rh(&mutex_);
@@ -412,6 +454,7 @@ class SingletonVault {
 
   mutable folly::RWSpinLock mutex_;
   SingletonMap singletons_;
+  std::unordered_set<detail::SingletonHolderBase*> eagerInitSingletons_;
   std::vector<detail::TypeDescriptor> creation_order_;
   SingletonVaultState state_{SingletonVaultState::Running};
   bool registrationComplete_{false};
@@ -423,7 +466,7 @@ class SingletonVault {
 // It allows for simple access to registering and instantiating
 // singletons.  Create instances of this class in the global scope of
 // type Singleton<T> to register your singleton for later access via
-// Singleton<T>::get().
+// Singleton<T>::try_get().
 template <typename T,
           typename Tag = detail::DefaultTag,
           typename VaultTag = detail::DefaultTag /* for testing */>
@@ -435,7 +478,7 @@ class Singleton {
   // Generally your program life cycle should be fine with calling
   // get() repeatedly rather than saving the reference, and then not
   // call get() during process shutdown.
-  static T* get() {
+  static T* get() __attribute__ ((__deprecated__("Replaced by try_get"))) {
     return getEntry().get();
   }
 
@@ -447,18 +490,24 @@ class Singleton {
     return getEntry().get_weak();
   }
 
-  // Allow the Singleton<t> instance to also retrieve the underlying
-  // singleton, if desired.
-  T& operator*() { return *get(); }
-  T* operator->() { return get(); }
+  // Preferred alternative to get_weak, it returns shared_ptr that can be
+  // stored; a singleton won't be destroyed unless shared_ptr is destroyed.
+  // Avoid holding these shared_ptrs beyond the scope of a function;
+  // don't put them in member variables, always use try_get() instead
+  //
+  // try_get() can return nullptr if the singleton was destroyed, caller is
+  // responsible for handling nullptr return
+  static std::shared_ptr<T> try_get() {
+    return getEntry().try_get();
+  }
 
   explicit Singleton(std::nullptr_t _ = nullptr,
-                     Singleton::TeardownFunc t = nullptr) :
+                     typename Singleton::TeardownFunc t = nullptr) :
       Singleton ([]() { return new T; }, std::move(t)) {
   }
 
-  explicit Singleton(Singleton::CreateFunc c,
-                     Singleton::TeardownFunc t = nullptr) {
+  explicit Singleton(typename Singleton::CreateFunc c,
+                     typename Singleton::TeardownFunc t = nullptr) {
     if (c == nullptr) {
       throw std::logic_error(
         "nullptr_t should be passed if you want T to be default constructed");
@@ -467,6 +516,28 @@ class Singleton {
     auto vault = SingletonVault::singleton<VaultTag>();
     getEntry().registerSingleton(std::move(c), getTeardownFunc(std::move(t)));
     vault->registerSingleton(&getEntry());
+  }
+
+  /**
+   * Should be instantiated as soon as "doEagerInit[Via]" is called.
+   * Singletons are usually lazy-loaded (built on-demand) but for those which
+   * are known to be needed, to avoid the potential lag for objects that take
+   * long to construct during runtime, there is an option to make sure these
+   * are built up-front.
+   *
+   * Use like:
+   *   Singleton<Foo> gFooInstance = Singleton<Foo>(...).shouldEagerInit();
+   *
+   * Or alternately, define the singleton as usual, and say
+   *   gFooInstance.shouldEagerInit();
+   *
+   * at some point prior to calling registrationComplete().
+   * Then doEagerInit() or doEagerInitVia(Executor*) can be called.
+   */
+  Singleton& shouldEagerInit() {
+    auto vault = SingletonVault::singleton<VaultTag>();
+    vault->addEagerInitSingleton(&getEntry());
+    return *this;
   }
 
   /**

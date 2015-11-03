@@ -102,7 +102,7 @@ void SharedPromise<T>::setValue(M&& v) {
 template <class T>
 template <class F>
 void SharedPromise<T>::setWith(F&& func) {
-  setTry(makeTryFunction(std::forward<F>(func)));
+  setTry(makeTryWith(std::forward<F>(func)));
 }
 
 template <class T>
@@ -122,6 +122,11 @@ void SharedPromise<T>::setTry(Try<T>&& t) {
   for (auto& p : promises) {
     p.setTry(Try<T>(try_));
   }
+}
+
+template <class T>
+bool SharedPromise<T>::isFulfilled() {
+  return hasValue_;
 }
 
 }

@@ -22,7 +22,7 @@
 #include <folly/ExceptionWrapper.h>
 #include <folly/Likely.h>
 #include <folly/Memory.h>
-#include <folly/futures/Deprecated.h>
+#include <folly/Portability.h>
 #include <folly/futures/FutureException.h>
 #include <folly/futures/Unit.h>
 
@@ -35,8 +35,7 @@ namespace folly {
  * context. Exceptions are stored as exception_wrappers so that the user can
  * minimize rethrows if so desired.
  *
- * There is a specialization, Try<void>, which represents either success
- * or an exception.
+ * To represent success or a captured exception, use Try<Unit>
  */
 template <class T>
 class Try {
@@ -74,6 +73,12 @@ class Try {
    */
   explicit Try(T&& v) : contains_(Contains::VALUE), value_(std::move(v)) {}
 
+  /// Implicit conversion from Try<void> to Try<Unit>
+  template <class T2 = T>
+  /* implicit */
+  Try(typename std::enable_if<std::is_same<Unit, T2>::value,
+                              Try<void> const&>::type t);
+
   /*
    * Construct a Try with an exception_wrapper
    *
@@ -89,7 +94,8 @@ class Try {
    *
    * @param ep The exception_pointer. Will be rethrown.
    */
-  explicit Try(std::exception_ptr ep) DEPRECATED
+  FOLLY_DEPRECATED("use Try(exception_wrapper)")
+  explicit Try(std::exception_ptr ep)
     : contains_(Contains::EXCEPTION) {
     try {
       std::rethrow_exception(ep);
@@ -249,7 +255,8 @@ class Try<void> {
    *
    * @param ep The exception_pointer. Will be rethrown.
    */
-  explicit Try(std::exception_ptr ep) DEPRECATED : hasValue_(false) {
+  FOLLY_DEPRECATED("use Try(exception_wrapper)")
+  explicit Try(std::exception_ptr ep) : hasValue_(false) {
     try {
       std::rethrow_exception(ep);
     } catch (const std::exception& e) {
@@ -343,14 +350,14 @@ class Try<void> {
  * @returns value contained in t
  */
 template <typename T>
-T moveFromTry(Try<T>&& t);
+T moveFromTry(Try<T>& t);
 
 /*
  * Throws if try contained an exception.
  *
  * @param t Try to move from
  */
-void moveFromTry(Try<void>&& t);
+void moveFromTry(Try<void>& t);
 
 /*
  * @param f a function to execute and capture the result of (value or exception)
@@ -364,7 +371,7 @@ typename std::enable_if<
 makeTryWith(F&& f);
 
 /*
- * Specialization of makeTryWith for void
+ * Specialization of makeTryWith for void return
  *
  * @param f a function to execute and capture the result of
  *

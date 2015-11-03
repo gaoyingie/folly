@@ -123,14 +123,16 @@ pthread_rwlock_t Read        728698     24us       101ns     7.28ms     194us
 #if defined(__GNUC__) && \
   (defined(__i386) || FOLLY_X64 || \
    defined(ARCH_K8))
-#define RW_SPINLOCK_USE_X86_INTRINSIC_
-#include <x86intrin.h>
+# define RW_SPINLOCK_USE_X86_INTRINSIC_
+# include <x86intrin.h>
+#elif defined(_MSC_VER) && defined(FOLLY_X64)
+# define RW_SPINLOCK_USE_X86_INTRINSIC_
 #else
-#undef RW_SPINLOCK_USE_X86_INTRINSIC_
+# undef RW_SPINLOCK_USE_X86_INTRINSIC_
 #endif
 
 // iOS doesn't define _mm_cvtsi64_si128 and friends
-#if defined(__SSE2__) && !TARGET_OS_IPHONE
+#if (FOLLY_SSE >= 2) && !TARGET_OS_IPHONE
 #define RW_SPINLOCK_USE_SSE_INSTRUCTIONS_
 #else
 #undef RW_SPINLOCK_USE_SSE_INSTRUCTIONS_
@@ -139,7 +141,6 @@ pthread_rwlock_t Read        728698     24us       101ns     7.28ms     194us
 #include <atomic>
 #include <string>
 #include <algorithm>
-#include <boost/noncopyable.hpp>
 
 #include <sched.h>
 #include <glog/logging.h>
@@ -163,10 +164,13 @@ namespace folly {
  * UpgradeLockable concepts except the TimedLockable related locking/unlocking
  * interfaces.
  */
-class RWSpinLock : boost::noncopyable {
+class RWSpinLock {
   enum : int32_t { READER = 4, UPGRADED = 2, WRITER = 1 };
  public:
-  RWSpinLock() : bits_(0) {}
+  constexpr RWSpinLock() : bits_(0) {}
+
+  RWSpinLock(RWSpinLock const&) = delete;
+  RWSpinLock& operator=(RWSpinLock const&) = delete;
 
   // Lockable Concept
   void lock() {
@@ -503,7 +507,7 @@ struct RWTicketIntTrait<32> {
 
 
 template<size_t kBitWidth, bool kFavorWriter=false>
-class RWTicketSpinLockT : boost::noncopyable {
+class RWTicketSpinLockT {
   typedef detail::RWTicketIntTrait<kBitWidth> IntTraitType;
   typedef typename detail::RWTicketIntTrait<kBitWidth>::FullInt FullInt;
   typedef typename detail::RWTicketIntTrait<kBitWidth>::HalfInt HalfInt;
@@ -511,6 +515,7 @@ class RWTicketSpinLockT : boost::noncopyable {
     QuarterInt;
 
   union RWTicket {
+    constexpr RWTicket() : whole(0) {}
     FullInt whole;
     HalfInt readWrite;
     __extension__ struct {
@@ -523,21 +528,22 @@ class RWTicketSpinLockT : boost::noncopyable {
  private: // Some x64-specific utilities for atomic access to ticket.
   template<class T> static T load_acquire(T* addr) {
     T t = *addr; // acquire barrier
-    asm volatile("" : : : "memory");
+    asm_volatile_memory();
     return t;
   }
 
   template<class T>
   static void store_release(T* addr, T v) {
-    asm volatile("" : : : "memory");
+    asm_volatile_memory();
     *addr = v; // release barrier
   }
 
  public:
 
-  RWTicketSpinLockT() {
-    store_release(&ticket.whole, FullInt(0));
-  }
+  constexpr RWTicketSpinLockT() {}
+
+  RWTicketSpinLockT(RWTicketSpinLockT const&) = delete;
+  RWTicketSpinLockT& operator=(RWTicketSpinLockT const&) = delete;
 
   void lock() {
     if (kFavorWriter) {
@@ -665,8 +671,11 @@ class RWTicketSpinLockT : boost::noncopyable {
   class WriteHolder;
 
   typedef RWTicketSpinLockT<kBitWidth, kFavorWriter> RWSpinLock;
-  class ReadHolder : boost::noncopyable {
+  class ReadHolder {
    public:
+    ReadHolder(ReadHolder const&) = delete;
+    ReadHolder& operator=(ReadHolder const&) = delete;
+
     explicit ReadHolder(RWSpinLock *lock = nullptr) :
       lock_(lock) {
       if (lock_) lock_->lock_shared();
@@ -702,8 +711,11 @@ class RWTicketSpinLockT : boost::noncopyable {
     RWSpinLock *lock_;
   };
 
-  class WriteHolder : boost::noncopyable {
+  class WriteHolder {
    public:
+    WriteHolder(WriteHolder const&) = delete;
+    WriteHolder& operator=(WriteHolder const&) = delete;
+
     explicit WriteHolder(RWSpinLock *lock = nullptr) : lock_(lock) {
       if (lock_) lock_->lock();
     }
@@ -737,11 +749,6 @@ class RWTicketSpinLockT : boost::noncopyable {
   }
   friend void acquireReadWrite(RWTicketSpinLockT& mutex) {
     mutex.lock();
-  }
-  friend bool acquireReadWrite(RWTicketSpinLockT& mutex,
-                               unsigned int milliseconds) {
-    mutex.lock();
-    return true;
   }
   friend void releaseRead(RWTicketSpinLockT& mutex) {
     mutex.unlock_shared();

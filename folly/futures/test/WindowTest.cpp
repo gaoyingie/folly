@@ -34,7 +34,7 @@ TEST(Window, basic) {
       window(
         input,
         [](int i) { return makeFuture(i); },
-        2),
+        window_size),
       0,
       [](int sum, const Try<int>& b) {
         return sum + *b;
@@ -52,19 +52,19 @@ TEST(Window, basic) {
     fn(input, 4, 6);
   }
   {
-    // empty inpt
+    // empty input
     std::vector<int> input;
     fn(input, 1, 0);
   }
   {
-    // int -> Future<void>
+    // int -> Future<Unit>
     auto res = reduce(
       window(
         std::vector<int>({1, 2, 3}),
         [](int i) { return makeFuture(); },
         2),
       0,
-      [](int sum, const Try<void>& b) {
+      [](int sum, const Try<Unit>& b) {
         EXPECT_TRUE(b.hasValue());
         return sum + 1;
       }).get();

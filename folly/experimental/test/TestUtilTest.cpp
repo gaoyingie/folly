@@ -23,6 +23,7 @@
 #include <system_error>
 
 #include <boost/algorithm/string.hpp>
+#include <folly/Memory.h>
 #include <glog/logging.h>
 #include <gtest/gtest.h>
 
@@ -133,6 +134,71 @@ TEST(CaptureFD, GlogPatterns) {
     EXPECT_PCRE_MATCH(glogWarningPattern(), s);
     EXPECT_PCRE_MATCH(glogErrOrWarnPattern(), s);
   }
+}
+
+TEST(CaptureFD, ChunkCob) {
+  std::vector<std::string> chunks;
+  {
+    CaptureFD stderr(2, [&](StringPiece p) {
+      chunks.emplace_back(p.str());
+      switch (chunks.size()) {
+        case 1:
+          EXPECT_PCRE_MATCH(".*foo.*bar.*", p);
+          break;
+        case 2:
+          EXPECT_PCRE_MATCH("[^\n]*baz.*", p);
+          break;
+        default:
+          FAIL() << "Got too many chunks: " << chunks.size();
+      }
+    });
+    LOG(INFO) << "foo";
+    LOG(INFO) << "bar";
+    EXPECT_PCRE_MATCH(".*foo.*bar.*", stderr.read());
+    auto chunk = stderr.readIncremental();
+    EXPECT_EQ(chunks.at(0), chunk);
+    LOG(INFO) << "baz";
+    EXPECT_PCRE_MATCH(".*foo.*bar.*baz.*", stderr.read());
+  }
+  EXPECT_EQ(2, chunks.size());
+}
+
+
+class EnvVarSaverTest : public testing::Test {};
+
+TEST_F(EnvVarSaverTest, ExampleNew) {
+  auto key = "hahahahaha";
+  EXPECT_EQ(nullptr, getenv(key));
+
+  auto saver = make_unique<EnvVarSaver>();
+  PCHECK(0 == setenv(key, "blah", true));
+  EXPECT_EQ("blah", std::string{getenv(key)});
+  saver = nullptr;
+  EXPECT_EQ(nullptr, getenv(key));
+}
+
+TEST_F(EnvVarSaverTest, ExampleExisting) {
+  auto key = "USER";
+  EXPECT_NE(nullptr, getenv(key));
+  auto value = std::string{getenv(key)};
+
+  auto saver = make_unique<EnvVarSaver>();
+  PCHECK(0 == setenv(key, "blah", true));
+  EXPECT_EQ("blah", std::string{getenv(key)});
+  saver = nullptr;
+  EXPECT_TRUE(value == getenv(key));
+}
+
+TEST_F(EnvVarSaverTest, ExampleDeleting) {
+  auto key = "USER";
+  EXPECT_NE(nullptr, getenv(key));
+  auto value = std::string{getenv(key)};
+
+  auto saver = make_unique<EnvVarSaver>();
+  PCHECK(0 == unsetenv(key));
+  EXPECT_EQ(nullptr, getenv(key));
+  saver = nullptr;
+  EXPECT_TRUE(value == getenv(key));
 }
 
 int main(int argc, char *argv[]) {

@@ -384,18 +384,23 @@ inline double   dynamic::asDouble() const { return asImpl<double>(); }
 inline int64_t  dynamic::asInt()    const { return asImpl<int64_t>(); }
 inline bool     dynamic::asBool()   const { return asImpl<bool>(); }
 
-inline const fbstring& dynamic::getString() const { return get<fbstring>(); }
-inline double          dynamic::getDouble() const { return get<double>(); }
-inline int64_t         dynamic::getInt()    const { return get<int64_t>(); }
-inline bool            dynamic::getBool()   const { return get<bool>(); }
+inline const fbstring& dynamic::getString() const& { return get<fbstring>(); }
+inline double          dynamic::getDouble() const& { return get<double>(); }
+inline int64_t         dynamic::getInt()    const& { return get<int64_t>(); }
+inline bool            dynamic::getBool()   const& { return get<bool>(); }
 
-inline fbstring& dynamic::getString() { return get<fbstring>(); }
-inline double&   dynamic::getDouble() { return get<double>(); }
-inline int64_t&  dynamic::getInt()    { return get<int64_t>(); }
-inline bool&     dynamic::getBool()   { return get<bool>(); }
+inline fbstring& dynamic::getString() & { return get<fbstring>(); }
+inline double&   dynamic::getDouble() & { return get<double>(); }
+inline int64_t&  dynamic::getInt()    & { return get<int64_t>(); }
+inline bool&     dynamic::getBool()   & { return get<bool>(); }
 
-inline const char* dynamic::data()  const { return get<fbstring>().data();  }
-inline const char* dynamic::c_str() const { return get<fbstring>().c_str(); }
+inline fbstring dynamic::getString() && { return std::move(get<fbstring>()); }
+inline double   dynamic::getDouble() && { return get<double>(); }
+inline int64_t  dynamic::getInt()    && { return get<int64_t>(); }
+inline bool     dynamic::getBool()   && { return get<bool>(); }
+
+inline const char* dynamic::data()  const& { return get<fbstring>().data();  }
+inline const char* dynamic::c_str() const& { return get<fbstring>().c_str(); }
 inline StringPiece dynamic::stringPiece() const { return get<fbstring>(); }
 
 template<class T>
@@ -404,7 +409,7 @@ struct dynamic::CompareOp {
 };
 template<>
 struct dynamic::CompareOp<dynamic::ObjectImpl> {
-  static bool comp(ObjectImpl const& a, ObjectImpl const& b) {
+  static bool comp(ObjectImpl const&, ObjectImpl const&) {
     // This code never executes; it is just here for the compiler.
     return false;
   }
@@ -460,8 +465,12 @@ inline dynamic& dynamic::operator--() {
   return *this;
 }
 
-inline dynamic const& dynamic::operator[](dynamic const& idx) const {
+inline dynamic const& dynamic::operator[](dynamic const& idx) const& {
   return at(idx);
+}
+
+inline dynamic dynamic::operator[](dynamic const& idx) && {
+  return std::move((*this)[idx]);
 }
 
 template<class K, class V> inline dynamic& dynamic::setDefault(K&& k, V&& v) {
@@ -470,12 +479,16 @@ template<class K, class V> inline dynamic& dynamic::setDefault(K&& k, V&& v) {
                                    std::forward<V>(v))).first->second;
 }
 
-inline dynamic* dynamic::get_ptr(dynamic const& idx) {
+inline dynamic* dynamic::get_ptr(dynamic const& idx) & {
   return const_cast<dynamic*>(const_cast<dynamic const*>(this)->get_ptr(idx));
 }
 
-inline dynamic& dynamic::at(dynamic const& idx) {
+inline dynamic& dynamic::at(dynamic const& idx) & {
   return const_cast<dynamic&>(const_cast<dynamic const*>(this)->at(idx));
+}
+
+inline dynamic dynamic::at(dynamic const& idx) && {
+  return std::move(at(idx));
 }
 
 inline bool dynamic::empty() const {
@@ -497,6 +510,41 @@ template<class K, class V> inline void dynamic::insert(K&& key, V&& val) {
   auto& obj = get<ObjectImpl>();
   auto rv = obj.insert({ std::forward<K>(key), nullptr });
   rv.first->second = std::forward<V>(val);
+}
+
+inline void dynamic::update(const dynamic& mergeObj) {
+  if (!isObject() || !mergeObj.isObject()) {
+    throw TypeError("object", type(), mergeObj.type());
+  }
+
+  for (const auto& pair : mergeObj.items()) {
+    (*this)[pair.first] = pair.second;
+  }
+}
+
+inline void dynamic::update_missing(const dynamic& mergeObj1) {
+  if (!isObject() || !mergeObj1.isObject()) {
+    throw TypeError("object", type(), mergeObj1.type());
+  }
+
+  // Only add if not already there
+  for (const auto& pair : mergeObj1.items()) {
+    if ((*this).find(pair.first) == (*this).items().end()) {
+      (*this)[pair.first] = pair.second;
+    }
+  }
+}
+
+inline dynamic dynamic::merge(
+    const dynamic& mergeObj1,
+    const dynamic& mergeObj2) {
+
+  // No checks on type needed here because they are done in update_missing
+  // Note that we do update_missing here instead of update() because
+  // it will prevent the extra writes that would occur with update()
+  auto ret = mergeObj2;
+  ret.update_missing(mergeObj1);
+  return ret;
 }
 
 inline std::size_t dynamic::erase(dynamic const& key) {
@@ -564,24 +612,22 @@ inline void dynamic::pop_back() {
 
 //////////////////////////////////////////////////////////////////////
 
-template<class T> struct dynamic::TypeInfo {
-  static char const name[];
-  static Type const type;
-};
+#define FOLLY_DYNAMIC_DEC_TYPEINFO(T, str, val) \
+  template <> struct dynamic::TypeInfo<T> { \
+    static constexpr const char* name = str; \
+    static constexpr dynamic::Type type = val; \
+  }; \
+  //
 
-#define FB_DEC_TYPE(T)                                      \
-  template<> char const dynamic::TypeInfo<T>::name[];       \
-  template<> dynamic::Type const dynamic::TypeInfo<T>::type
+FOLLY_DYNAMIC_DEC_TYPEINFO(void*,               "null",    dynamic::NULLT)
+FOLLY_DYNAMIC_DEC_TYPEINFO(bool,                "boolean", dynamic::BOOL)
+FOLLY_DYNAMIC_DEC_TYPEINFO(fbstring,            "string",  dynamic::STRING)
+FOLLY_DYNAMIC_DEC_TYPEINFO(dynamic::Array,      "array",   dynamic::ARRAY)
+FOLLY_DYNAMIC_DEC_TYPEINFO(double,              "double",  dynamic::DOUBLE)
+FOLLY_DYNAMIC_DEC_TYPEINFO(int64_t,             "int64",   dynamic::INT64)
+FOLLY_DYNAMIC_DEC_TYPEINFO(dynamic::ObjectImpl, "object",  dynamic::OBJECT)
 
-FB_DEC_TYPE(void*);
-FB_DEC_TYPE(bool);
-FB_DEC_TYPE(fbstring);
-FB_DEC_TYPE(dynamic::Array);
-FB_DEC_TYPE(double);
-FB_DEC_TYPE(int64_t);
-FB_DEC_TYPE(dynamic::ObjectImpl);
-
-#undef FB_DEC_TYPE
+#undef FOLLY_DYNAMIC_DEC_TYPEINFO
 
 template<class T>
 T dynamic::asImpl() const {
@@ -597,7 +643,7 @@ T dynamic::asImpl() const {
 
 // Return a T* to our type, or null if we're not that type.
 template<class T>
-T* dynamic::get_nothrow() noexcept {
+T* dynamic::get_nothrow() & noexcept {
   if (type_ != TypeInfo<T>::type) {
     return nullptr;
   }
@@ -605,7 +651,7 @@ T* dynamic::get_nothrow() noexcept {
 }
 
 template<class T>
-T const* dynamic::get_nothrow() const noexcept {
+T const* dynamic::get_nothrow() const& noexcept {
   return const_cast<dynamic*>(this)->get_nothrow<T>();
 }
 

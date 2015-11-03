@@ -117,7 +117,11 @@ public:
     other.s_ = "";
   }
   MoveTester& operator=(const MoveTester&) = default;
-  MoveTester& operator=(MoveTester&&) = default;
+  MoveTester& operator=(MoveTester&& other) noexcept {
+    s_ = std::move(other.s_);
+    other.s_ = "";
+    return *this;
+  }
 private:
   friend bool operator==(const MoveTester& o1, const MoveTester& o2);
   std::string s_;
@@ -157,6 +161,41 @@ TEST(Optional, value_or_noncopyable) {
   Optional<std::unique_ptr<int>> opt;
   std::unique_ptr<int> dflt(new int(42));
   EXPECT_EQ(42, *std::move(opt).value_or(std::move(dflt)));
+}
+
+struct ExpectingDeleter {
+  explicit ExpectingDeleter(int expected) : expected(expected) { }
+  int expected;
+  void operator()(const int* ptr) {
+    EXPECT_EQ(*ptr, expected);
+    delete ptr;
+  }
+};
+
+TEST(Optional, value_life_extention) {
+  // Extends the life of the value.
+  const auto& ptr = Optional<std::unique_ptr<int, ExpectingDeleter>>(
+      {new int(42), ExpectingDeleter{1337}}).value();
+  *ptr = 1337;
+}
+
+TEST(Optional, value_move) {
+  auto ptr = Optional<std::unique_ptr<int, ExpectingDeleter>>(
+      {new int(42), ExpectingDeleter{1337}}).value();
+  *ptr = 1337;
+}
+
+TEST(Optional, dereference_life_extention) {
+  // Extends the life of the value.
+  const auto& ptr = *Optional<std::unique_ptr<int, ExpectingDeleter>>(
+      {new int(42), ExpectingDeleter{1337}});
+  *ptr = 1337;
+}
+
+TEST(Optional, dereference_move) {
+  auto ptr = *Optional<std::unique_ptr<int, ExpectingDeleter>>(
+      {new int(42), ExpectingDeleter{1337}});
+  *ptr = 1337;
 }
 
 TEST(Optional, EmptyConstruct) {
@@ -363,6 +402,7 @@ TEST(Optional, Conversions) {
 
   // intended explicit operator bool, for if (opt).
   bool b(mbool);
+  EXPECT_FALSE(b);
 
   // Truthy tests work and are not ambiguous
   if (mbool && mshort && mstr && mint) { // only checks not-empty
@@ -495,6 +535,11 @@ TEST(Optional, AssignmentContained) {
     target = opt_uninit;
     EXPECT_FALSE(target.hasValue());
   }
+}
+
+TEST(Optional, Exceptions) {
+  Optional<int> empty;
+  EXPECT_THROW(empty.value(), OptionalEmptyException);
 }
 
 }

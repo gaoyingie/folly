@@ -27,15 +27,15 @@
 #include <cstdlib>
 #include <limits>
 #include <type_traits>
-#include <glog/logging.h>
 
 #include <folly/Bits.h>
-#include <folly/CpuId.h>
 #include <folly/Likely.h>
 #include <folly/Portability.h>
 #include <folly/Range.h>
 #include <folly/experimental/Instructions.h>
 #include <folly/experimental/Select64.h>
+#include <glog/logging.h>
+
 #ifndef __GNUC__
 #error EliasFanoCoding.h requires GCC
 #endif
@@ -56,23 +56,21 @@ struct EliasFanoCompressedListBase {
 
   template <class OtherPointer>
   EliasFanoCompressedListBase(
-    const EliasFanoCompressedListBase<OtherPointer>& other)
+      const EliasFanoCompressedListBase<OtherPointer>& other)
       : size(other.size),
         numLowerBits(other.numLowerBits),
         data(other.data),
         skipPointers(reinterpret_cast<Pointer>(other.skipPointers)),
         forwardPointers(reinterpret_cast<Pointer>(other.forwardPointers)),
         lower(reinterpret_cast<Pointer>(other.lower)),
-        upper(reinterpret_cast<Pointer>(other.upper)) {
+        upper(reinterpret_cast<Pointer>(other.upper)) { }
+
+  template <class T = Pointer>
+  auto free() -> decltype(::free(T(nullptr))) {
+    return ::free(data.data());
   }
 
-  void free() {
-    ::free(const_cast<unsigned char*>(data.data()));
-  }
-
-  size_t upperSize() const {
-    return data.end() - upper;
-  }
+  size_t upperSize() const { return data.end() - upper; }
 
   size_t size = 0;
   uint8_t numLowerBits = 0;
@@ -96,10 +94,11 @@ template <class Value,
           size_t kForwardQuantum = 0>  // 0 = disabled
 struct EliasFanoEncoderV2 {
   static_assert(std::is_integral<Value>::value &&
-                std::is_unsigned<Value>::value,
+                    std::is_unsigned<Value>::value,
                 "Value should be unsigned integral");
 
   typedef EliasFanoCompressedList CompressedList;
+  typedef MutableEliasFanoCompressedList MutableCompressedList;
 
   typedef Value ValueType;
   typedef SkipValue SkipValueType;
@@ -122,10 +121,10 @@ struct EliasFanoEncoderV2 {
   // EliasFanoCompressedList has no ownership of it, you need to call
   // free() explicitly.
   template <class RandomAccessIterator>
-  static EliasFanoCompressedList encode(RandomAccessIterator begin,
-                                        RandomAccessIterator end) {
+  static MutableCompressedList encode(RandomAccessIterator begin,
+                                      RandomAccessIterator end) {
     if (begin == end) {
-      return EliasFanoCompressedList();
+      return MutableCompressedList();
     }
     EliasFanoEncoderV2 encoder(end - begin, *(end - 1));
     for (; begin != end; ++begin) {
@@ -134,23 +133,23 @@ struct EliasFanoEncoderV2 {
     return encoder.finish();
   }
 
-  explicit EliasFanoEncoderV2(const MutableEliasFanoCompressedList& result)
+  explicit EliasFanoEncoderV2(const MutableCompressedList& result)
       : lower_(result.lower),
         upper_(result.upper),
         skipPointers_(reinterpret_cast<SkipValueType*>(
-                        result.skipPointers)),
+              result.skipPointers)),
         forwardPointers_(reinterpret_cast<SkipValueType*>(
-                           result.forwardPointers)),
+              result.forwardPointers)),
         result_(result) {
     memset(result.data.data(), 0, result.data.size());
   }
 
   EliasFanoEncoderV2(size_t size, ValueType upperBound)
       : EliasFanoEncoderV2(
-            Layout::fromUpperBoundAndSize(upperBound, size).allocList()) {
-  }
+            Layout::fromUpperBoundAndSize(upperBound, size).allocList()) { }
 
   void add(ValueType value) {
+    CHECK_LT(value, std::numeric_limits<ValueType>::max());
     CHECK_GE(value, lastValue_);
 
     const auto numLowerBits = result_.numLowerBits;
@@ -184,7 +183,7 @@ struct EliasFanoEncoderV2 {
     ++size_;
   }
 
-  const EliasFanoCompressedList& finish() const {
+  const MutableCompressedList& finish() const {
     CHECK_EQ(size_, result_.size);
     return result_;
   }
@@ -210,7 +209,7 @@ struct EliasFanoEncoderV2 {
   size_t size_ = 0;
   size_t skipPointersSize_ = 0;
 
-  EliasFanoCompressedList result_;
+  MutableCompressedList result_;
 };
 
 template <class Value,
@@ -283,7 +282,7 @@ struct EliasFanoEncoderV2<Value,
     return lower + upper + skipPointers + forwardPointers;
   }
 
-  template <typename Range>
+  template <class Range>
   EliasFanoCompressedListBase<typename Range::iterator>
   openList(Range& buf) const {
     EliasFanoCompressedListBase<typename Range::iterator> result;
@@ -305,7 +304,7 @@ struct EliasFanoEncoderV2<Value,
     return result;
   }
 
-  MutableEliasFanoCompressedList allocList() const {
+  MutableCompressedList allocList() const {
     uint8_t* buf = nullptr;
     // WARNING: Current read/write logic assumes that the 7 bytes
     // following the last byte of lower and upper sequences are
@@ -337,10 +336,10 @@ class UpperBitsReader {
  public:
   typedef typename Encoder::ValueType ValueType;
 
-  explicit UpperBitsReader(const EliasFanoCompressedList& list)
-    : forwardPointers_(list.forwardPointers),
-      skipPointers_(list.skipPointers),
-      start_(list.upper) {
+  explicit UpperBitsReader(const typename Encoder::CompressedList& list)
+      : forwardPointers_(list.forwardPointers),
+        skipPointers_(list.skipPointers),
+        start_(list.upper) {
     reset();
   }
 
@@ -529,7 +528,7 @@ class EliasFanoReader {
   typedef Encoder EncoderType;
   typedef typename Encoder::ValueType ValueType;
 
-  explicit EliasFanoReader(const EliasFanoCompressedList& list)
+  explicit EliasFanoReader(const typename Encoder::CompressedList& list)
       : size_(list.size),
         lower_(list.lower),
         upper_(list),
@@ -553,7 +552,7 @@ class EliasFanoReader {
 
   void reset() {
     upper_.reset();
-    value_ = 0;
+    value_ = kInvalidValue;
   }
 
   bool next() {
@@ -584,11 +583,13 @@ class EliasFanoReader {
   }
 
   bool skipTo(ValueType value) {
-    DCHECK_GE(value, value_);
-    if (value <= value_) {
-      return true;
-    } else if (!kUnchecked && value > lastValue_) {
+    // Also works when value_ == kInvalidValue.
+    if (value != kInvalidValue) { DCHECK_GE(value + 1, value_ + 1); }
+
+    if (!kUnchecked && value > lastValue_) {
       return setDone();
+    } else if (value == value_) {
+      return true;
     }
 
     size_t upperValue = (value >> numLowerBits_);
@@ -608,21 +609,15 @@ class EliasFanoReader {
   }
 
   bool jump(size_t n) {
-    if (LIKELY(n - 1 < size_)) {  // n > 0 && n <= size_
-      value_ = readLowerPart(n - 1) | (upper_.jump(n) << numLowerBits_);
-      return true;
-    } else if (n == 0) {
-      reset();
+    if (LIKELY(n < size_)) {  // Also checks that n != -1.
+      value_ = readLowerPart(n) | (upper_.jump(n + 1) << numLowerBits_);
       return true;
     }
     return setDone();
   }
 
   bool jumpTo(ValueType value) {
-    if (value <= 0) {
-      reset();
-      return true;
-    } else if (!kUnchecked && value > lastValue_) {
+    if (!kUnchecked && value > lastValue_) {
       return setDone();
     }
 
@@ -640,12 +635,22 @@ class EliasFanoReader {
 
   size_t size() const { return size_; }
 
+  bool valid() const {
+    return position() < size(); // Also checks that position() != -1.
+  }
+
   size_t position() const { return upper_.position(); }
-  ValueType value() const { return value_; }
+  ValueType value() const {
+    DCHECK(valid());
+    return value_;
+  }
 
  private:
+  constexpr static ValueType kInvalidValue =
+    std::numeric_limits<ValueType>::max();  // Must hold kInvalidValue + 1 == 0.
+
   bool setDone() {
-    value_ = std::numeric_limits<ValueType>::max();
+    value_ = kInvalidValue;
     upper_.setDone(size_);
     return false;
   }
@@ -673,7 +678,7 @@ class EliasFanoReader {
   const uint8_t* lower_;
   detail::UpperBitsReader<Encoder, Instructions> upper_;
   const ValueType lowerMask_;
-  ValueType value_ = 0;
+  ValueType value_ = kInvalidValue;
   ValueType lastValue_;
   uint8_t numLowerBits_;
 };

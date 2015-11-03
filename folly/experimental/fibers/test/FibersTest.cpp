@@ -205,8 +205,6 @@ TEST(FiberManager, batonTimedWaitPostEvb) {
 TEST(FiberManager, batonTryWait) {
 
   FiberManager manager(folly::make_unique<SimpleLoopController>());
-  auto& loopController =
-    dynamic_cast<SimpleLoopController&>(manager.loopController());
 
   // Check if try_wait and post work as expected
   Baton b;
@@ -1332,6 +1330,141 @@ TEST(FiberManager, yieldTest) {
   EXPECT_TRUE(checkRan);
 }
 
+TEST(FiberManager, RequestContext) {
+  FiberManager fm(folly::make_unique<SimpleLoopController>());
+
+  bool checkRun1 = false;
+  bool checkRun2 = false;
+  bool checkRun3 = false;
+
+  folly::fibers::Baton baton1;
+  folly::fibers::Baton baton2;
+  folly::fibers::Baton baton3;
+
+  folly::RequestContext::create();
+  auto rcontext1 = folly::RequestContext::get();
+  fm.addTask([&]() {
+      EXPECT_EQ(rcontext1, folly::RequestContext::get());
+      baton1.wait([&]() {
+          EXPECT_EQ(rcontext1, folly::RequestContext::get());
+        });
+      EXPECT_EQ(rcontext1, folly::RequestContext::get());
+      runInMainContext([&]() {
+          EXPECT_EQ(rcontext1, folly::RequestContext::get());
+        });
+      checkRun1 = true;
+    });
+
+  folly::RequestContext::create();
+  auto rcontext2 = folly::RequestContext::get();
+  fm.addTaskRemote([&]() {
+      EXPECT_EQ(rcontext2, folly::RequestContext::get());
+      baton2.wait();
+      EXPECT_EQ(rcontext2, folly::RequestContext::get());
+      checkRun2 = true;
+    });
+
+  folly::RequestContext::create();
+  auto rcontext3 = folly::RequestContext::get();
+  fm.addTaskFinally([&]() {
+      EXPECT_EQ(rcontext3, folly::RequestContext::get());
+      baton3.wait();
+      EXPECT_EQ(rcontext3, folly::RequestContext::get());
+
+      return folly::Unit();
+    },
+    [&](Try<folly::Unit>&& t) {
+      EXPECT_EQ(rcontext3, folly::RequestContext::get());
+      checkRun3 = true;
+    });
+
+  folly::RequestContext::create();
+  auto rcontext = folly::RequestContext::get();
+
+  fm.loopUntilNoReady();
+  EXPECT_EQ(rcontext, folly::RequestContext::get());
+
+  baton1.post();
+  EXPECT_EQ(rcontext, folly::RequestContext::get());
+  fm.loopUntilNoReady();
+  EXPECT_TRUE(checkRun1);
+  EXPECT_EQ(rcontext, folly::RequestContext::get());
+
+  baton2.post();
+  EXPECT_EQ(rcontext, folly::RequestContext::get());
+  fm.loopUntilNoReady();
+  EXPECT_TRUE(checkRun2);
+  EXPECT_EQ(rcontext, folly::RequestContext::get());
+
+  baton3.post();
+  EXPECT_EQ(rcontext, folly::RequestContext::get());
+  fm.loopUntilNoReady();
+  EXPECT_TRUE(checkRun3);
+  EXPECT_EQ(rcontext, folly::RequestContext::get());
+}
+
+TEST(FiberManager, resizePeriodically) {
+  FiberManager::Options opts;
+  opts.fibersPoolResizePeriodMs = 300;
+  opts.maxFibersPoolSize = 5;
+
+  FiberManager manager(folly::make_unique<EventBaseLoopController>(), opts);
+
+  folly::EventBase evb;
+  dynamic_cast<EventBaseLoopController&>(manager.loopController())
+    .attachEventBase(evb);
+
+  std::vector<Baton> batons(10);
+
+  size_t tasksRun = 0;
+  for (size_t i = 0; i < 30; ++i) {
+    manager.addTask([i, &batons, &tasksRun]() {
+      ++tasksRun;
+      // Keep some fibers active indefinitely
+      if (i < batons.size()) {
+        batons[i].wait();
+      }
+    });
+  }
+
+  EXPECT_EQ(0, tasksRun);
+  EXPECT_EQ(30, manager.fibersAllocated());
+  EXPECT_EQ(0, manager.fibersPoolSize());
+
+  evb.loopOnce();
+  EXPECT_EQ(30, tasksRun);
+  EXPECT_EQ(30, manager.fibersAllocated());
+  // Can go over maxFibersPoolSize, 10 of 30 fibers still active
+  EXPECT_EQ(20, manager.fibersPoolSize());
+
+  std::this_thread::sleep_for(std::chrono::milliseconds(400));
+  evb.loopOnce(); // no fibers active in this period
+  EXPECT_EQ(30, manager.fibersAllocated());
+  EXPECT_EQ(20, manager.fibersPoolSize());
+
+  std::this_thread::sleep_for(std::chrono::milliseconds(400));
+  evb.loopOnce(); // should shrink fibers pool to maxFibersPoolSize
+  EXPECT_EQ(15, manager.fibersAllocated());
+  EXPECT_EQ(5, manager.fibersPoolSize());
+
+  for (size_t i = 0; i < batons.size(); ++i) {
+    batons[i].post();
+  }
+  evb.loopOnce();
+  EXPECT_EQ(15, manager.fibersAllocated());
+  EXPECT_EQ(15, manager.fibersPoolSize());
+
+  std::this_thread::sleep_for(std::chrono::milliseconds(400));
+  evb.loopOnce(); // 10 fibers active in last period
+  EXPECT_EQ(10, manager.fibersAllocated());
+  EXPECT_EQ(10, manager.fibersPoolSize());
+
+  std::this_thread::sleep_for(std::chrono::milliseconds(400));
+  evb.loopOnce();
+  EXPECT_EQ(5, manager.fibersAllocated());
+  EXPECT_EQ(5, manager.fibersPoolSize());
+}
+
 static size_t sNumAwaits;
 
 void runBenchmark(size_t numAwaits, size_t toSend) {
@@ -1358,7 +1491,7 @@ void runBenchmark(size_t numAwaits, size_t toSend) {
               [&pendingRequests](Promise<int> promise) {
                 pendingRequests.push(std::move(promise));
               });
-            assert(result == 0);
+            DCHECK_EQ(result, 0);
           }
         });
 
@@ -1377,4 +1510,59 @@ BENCHMARK(FiberManagerBasicOneAwait, iters) {
 
 BENCHMARK(FiberManagerBasicFiveAwaits, iters) {
   runBenchmark(5, iters);
+}
+
+BENCHMARK(FiberManagerAllocateDeallocatePattern, iters) {
+  static const size_t kNumAllocations = 10000;
+
+  FiberManager::Options opts;
+  opts.maxFibersPoolSize = 0;
+
+  FiberManager fiberManager(folly::make_unique<SimpleLoopController>(), opts);
+
+  for (size_t iter = 0; iter < iters; ++iter) {
+    EXPECT_EQ(0, fiberManager.fibersPoolSize());
+
+    size_t fibersRun = 0;
+
+    for (size_t i = 0; i < kNumAllocations; ++i) {
+      fiberManager.addTask(
+        [&fibersRun] {
+          ++fibersRun;
+        }
+      );
+      fiberManager.loopUntilNoReady();
+    }
+
+    EXPECT_EQ(10000, fibersRun);
+    EXPECT_EQ(0, fiberManager.fibersPoolSize());
+  }
+}
+
+BENCHMARK(FiberManagerAllocateLargeChunk, iters) {
+  static const size_t kNumAllocations = 10000;
+
+  FiberManager::Options opts;
+  opts.maxFibersPoolSize = 0;
+
+  FiberManager fiberManager(folly::make_unique<SimpleLoopController>(), opts);
+
+  for (size_t iter = 0; iter < iters; ++iter) {
+    EXPECT_EQ(0, fiberManager.fibersPoolSize());
+
+    size_t fibersRun = 0;
+
+    for (size_t i = 0; i < kNumAllocations; ++i) {
+      fiberManager.addTask(
+        [&fibersRun] {
+          ++fibersRun;
+        }
+      );
+    }
+
+    fiberManager.loopUntilNoReady();
+
+    EXPECT_EQ(10000, fibersRun);
+    EXPECT_EQ(0, fiberManager.fibersPoolSize());
+  }
 }

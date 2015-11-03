@@ -16,7 +16,7 @@
 
 #pragma once
 
-#include <folly/futures/Deprecated.h>
+#include <folly/Portability.h>
 #include <folly/futures/Try.h>
 #include <functional>
 
@@ -53,7 +53,8 @@ public:
       p.setException(std::current_exception());
     }
     */
-  void setException(std::exception_ptr const&) DEPRECATED;
+  FOLLY_DEPRECATED("use setException(exception_wrapper)")
+  void setException(std::exception_ptr const&);
 
   /** Fulfill the Promise with an exception type E, which can be passed to
     std::make_exception_ptr(). Useful for originating exceptions. If you
@@ -69,13 +70,6 @@ public:
   /// an exception (or special value) indicating how the interrupt was
   /// handled.
   void setInterruptHandler(std::function<void(exception_wrapper const&)>);
-
-  /// Fulfill this Promise<void>
-  template <class B = T>
-  typename std::enable_if<std::is_void<B>::value, void>::type
-  setValue() {
-    setTry(Try<T>());
-  }
 
   /// Sugar to fulfill this Promise<Unit>
   template <class B = T>

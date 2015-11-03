@@ -25,6 +25,14 @@
 
 using namespace folly;
 
+TEST(make_unique, compatible_with_std_make_unique) {
+  //  HACK: To enforce that `folly::` is imported here.
+  to_shared_ptr(std::unique_ptr<std::string>());
+
+  using namespace std;
+  make_unique<string>("hello, world");
+}
+
 template <std::size_t> struct T {};
 template <std::size_t> struct S {};
 template <std::size_t> struct P {};

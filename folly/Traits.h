@@ -240,8 +240,10 @@ FOLLY_NAMESPACE_STD_BEGIN
 template <class T, class U>
   struct pair;
 #ifndef _GLIBCXX_USE_FB
+FOLLY_GLIBCXX_NAMESPACE_CXX11_BEGIN
 template <class T, class R, class A>
   class basic_string;
+FOLLY_GLIBCXX_NAMESPACE_CXX11_END
 #else
 template <class T, class R, class A, class S>
   class basic_string;
@@ -250,8 +252,10 @@ template <class T, class A>
   class vector;
 template <class T, class A>
   class deque;
+FOLLY_GLIBCXX_NAMESPACE_CXX11_BEGIN
 template <class T, class A>
   class list;
+FOLLY_GLIBCXX_NAMESPACE_CXX11_END
 template <class T, class C, class A>
   class set;
 template <class K, class V, class C, class A>
@@ -309,7 +313,7 @@ struct is_negative_impl {
 
 template <typename T>
 struct is_negative_impl<T, false> {
-  constexpr static bool check(T x) { return false; }
+  constexpr static bool check(T) { return false; }
 };
 
 // folly::to integral specializations can end up generating code
@@ -320,67 +324,21 @@ struct is_negative_impl<T, false> {
 #pragma GCC diagnostic ignored "-Wsign-compare"
 
 template <typename RHS, RHS rhs, typename LHS>
-bool less_than_impl(
-  typename std::enable_if<
-    (rhs <= std::numeric_limits<LHS>::max()
-      && rhs > std::numeric_limits<LHS>::min()),
-    LHS
-  >::type const lhs
-) {
-  return lhs < rhs;
-}
-
-template <typename RHS, RHS rhs, typename LHS>
-bool less_than_impl(
-  typename std::enable_if<
-    (rhs > std::numeric_limits<LHS>::max()),
-    LHS
-  >::type const
-) {
-  return true;
-}
-
-template <typename RHS, RHS rhs, typename LHS>
-bool less_than_impl(
-  typename std::enable_if<
-    (rhs <= std::numeric_limits<LHS>::min()),
-    LHS
-  >::type const
-) {
-  return false;
+bool less_than_impl(LHS const lhs) {
+  return
+    rhs > std::numeric_limits<LHS>::max() ? true :
+    rhs <= std::numeric_limits<LHS>::min() ? false :
+    lhs < rhs;
 }
 
 #pragma GCC diagnostic pop
 
 template <typename RHS, RHS rhs, typename LHS>
-bool greater_than_impl(
-  typename std::enable_if<
-    (rhs <= std::numeric_limits<LHS>::max()
-      && rhs >= std::numeric_limits<LHS>::min()),
-    LHS
-  >::type const lhs
-) {
-  return lhs > rhs;
-}
-
-template <typename RHS, RHS rhs, typename LHS>
-bool greater_than_impl(
-  typename std::enable_if<
-    (rhs > std::numeric_limits<LHS>::max()),
-    LHS
-  >::type const
-) {
-  return false;
-}
-
-template <typename RHS, RHS rhs, typename LHS>
-bool greater_than_impl(
-  typename std::enable_if<
-    (rhs < std::numeric_limits<LHS>::min()),
-    LHS
-  >::type const
-) {
-  return true;
+bool greater_than_impl(LHS const lhs) {
+  return
+    rhs > std::numeric_limits<LHS>::max() ? false :
+    rhs < std::numeric_limits<LHS>::min() ? true :
+    lhs > rhs;
 }
 
 } // namespace detail {
@@ -431,6 +389,16 @@ FOLLY_ASSUME_FBVECTOR_COMPATIBLE_1(std::function);
 
 // Boost
 FOLLY_ASSUME_FBVECTOR_COMPATIBLE_1(boost::shared_ptr);
+
+#define FOLLY_CREATE_HAS_MEMBER_TYPE_TRAITS(classname, type_name) \
+  template <typename T> \
+  struct classname { \
+    template <typename C> \
+    constexpr static bool test(typename C::type_name*) { return true; } \
+    template <typename> \
+    constexpr static bool test(...) { return false; } \
+    constexpr static bool value = test<T>(nullptr); \
+  }
 
 #define FOLLY_CREATE_HAS_MEMBER_FN_TRAITS_IMPL(classname, func_name, cv_qual) \
   template <typename TTheClass_, typename RTheReturn_, typename... TTheArgs_> \

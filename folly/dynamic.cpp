@@ -20,19 +20,20 @@ namespace folly {
 
 //////////////////////////////////////////////////////////////////////
 
-#define DEF_TYPE(T, str, typen)                                 \
-  template<> char const dynamic::TypeInfo<T>::name[] = str;       \
-  template<> dynamic::Type const dynamic::TypeInfo<T>::type = typen
+#define FOLLY_DYNAMIC_DEF_TYPEINFO(T) \
+  constexpr const char* dynamic::TypeInfo<T>::name; \
+  constexpr dynamic::Type dynamic::TypeInfo<T>::type; \
+  //
 
-DEF_TYPE(void*,               "null",    dynamic::NULLT);
-DEF_TYPE(bool,                "boolean", dynamic::BOOL);
-DEF_TYPE(fbstring,            "string",  dynamic::STRING);
-DEF_TYPE(dynamic::Array,      "array",   dynamic::ARRAY);
-DEF_TYPE(double,              "double",  dynamic::DOUBLE);
-DEF_TYPE(int64_t,             "int64",   dynamic::INT64);
-DEF_TYPE(dynamic::ObjectImpl, "object",  dynamic::OBJECT);
+FOLLY_DYNAMIC_DEF_TYPEINFO(void*)
+FOLLY_DYNAMIC_DEF_TYPEINFO(bool)
+FOLLY_DYNAMIC_DEF_TYPEINFO(fbstring)
+FOLLY_DYNAMIC_DEF_TYPEINFO(dynamic::Array)
+FOLLY_DYNAMIC_DEF_TYPEINFO(double)
+FOLLY_DYNAMIC_DEF_TYPEINFO(int64_t)
+FOLLY_DYNAMIC_DEF_TYPEINFO(dynamic::ObjectImpl)
 
-#undef DEF_TYPE
+#undef FOLLY_DYNAMIC_DEF_TYPEINFO
 
 const char* dynamic::typeName() const {
   return typeName(type_);
@@ -132,7 +133,7 @@ dynamic& dynamic::operator=(dynamic&& o) noexcept {
   return *this;
 }
 
-dynamic& dynamic::operator[](dynamic const& k) {
+dynamic& dynamic::operator[](dynamic const& k) & {
   if (!isObject() && !isArray()) {
     throw TypeError("object/array", type());
   }
@@ -144,28 +145,46 @@ dynamic& dynamic::operator[](dynamic const& k) {
   return ret.first->second;
 }
 
-dynamic dynamic::getDefault(const dynamic& k, const dynamic& v) const {
+dynamic dynamic::getDefault(const dynamic& k, const dynamic& v) const& {
   auto& obj = get<ObjectImpl>();
   auto it = obj.find(k);
   return it == obj.end() ? v : it->second;
 }
 
-dynamic&& dynamic::getDefault(const dynamic& k, dynamic&& v) const {
+dynamic dynamic::getDefault(const dynamic& k, dynamic&& v) const& {
   auto& obj = get<ObjectImpl>();
   auto it = obj.find(k);
-  if (it != obj.end()) {
-    v = it->second;
+  // Avoid clang bug with ternary
+  if (it == obj.end()) {
+    return std::move(v);
+  } else {
+    return it->second;
   }
-
-  return std::move(v);
 }
 
-const dynamic* dynamic::get_ptr(dynamic const& idx) const {
+dynamic dynamic::getDefault(const dynamic& k, const dynamic& v) && {
+  auto& obj = get<ObjectImpl>();
+  auto it = obj.find(k);
+  // Avoid clang bug with ternary
+  if (it == obj.end()) {
+    return v;
+  } else {
+    return std::move(it->second);
+  }
+}
+
+dynamic dynamic::getDefault(const dynamic& k, dynamic&& v) && {
+  auto& obj = get<ObjectImpl>();
+  auto it = obj.find(k);
+  return std::move(it == obj.end() ? v : it->second);
+}
+
+const dynamic* dynamic::get_ptr(dynamic const& idx) const& {
   if (auto* parray = get_nothrow<Array>()) {
     if (!idx.isInt()) {
       throw TypeError("int64", idx.type());
     }
-    if (idx >= parray->size()) {
+    if (idx < 0 || idx >= parray->size()) {
       return nullptr;
     }
     return &(*parray)[idx.asInt()];
@@ -180,7 +199,7 @@ const dynamic* dynamic::get_ptr(dynamic const& idx) const {
   }
 }
 
-dynamic const& dynamic::at(dynamic const& idx) const {
+dynamic const& dynamic::at(dynamic const& idx) const& {
   if (auto* parray = get_nothrow<Array>()) {
     if (!idx.isInt()) {
       throw TypeError("int64", idx.type());

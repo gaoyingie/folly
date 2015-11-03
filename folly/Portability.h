@@ -17,6 +17,10 @@
 #ifndef FOLLY_PORTABILITY_H_
 #define FOLLY_PORTABILITY_H_
 
+#include <string.h>
+
+#include <cstddef>
+
 #ifndef FOLLY_NO_CONFIG
 #include <folly/folly-config.h>
 #endif
@@ -53,15 +57,17 @@
   #endif
 #endif
 
-// MaxAlign: max_align_t isn't supported by gcc
-#ifdef __GNUC__
-struct MaxAlign { char c; } __attribute__((__aligned__));
-#else /* !__GNUC__ */
-# error Cannot define MaxAlign on this platform
-#endif
-
 // compiler specific attribute translation
 // msvc should come first, so if clang is in msvc mode it gets the right defines
+
+#if defined(__clang__) || defined(__GNUC__)
+# define FOLLY_ALIGNED(size) __attribute__((__aligned__(size)))
+#elif defined(_MSC_VER)
+# define FOLLY_ALIGNED(size) __declspec(align(size))
+#else
+# error Cannot define FOLLY_ALIGNED on this platform
+#endif
+#define FOLLY_ALIGNED_MAX FOLLY_ALIGNED(alignof(std::max_align_t))
 
 // NOTE: this will only do checking in msvc with versions that support /analyze
 #if _MSC_VER
@@ -82,8 +88,10 @@ struct MaxAlign { char c; } __attribute__((__aligned__));
 // deprecated
 #if defined(__clang__) || defined(__GNUC__)
 # define FOLLY_DEPRECATED(msg) __attribute__((__deprecated__(msg)))
+#elif defined(_MSC_VER)
+# define FOLLY_DEPRECATED(msg) __declspec(deprecated(msg))
 #else
-# define FOLLY_DEPRECATED
+# define FOLLY_DEPRECATED(msg)
 #endif
 
 // noreturn
@@ -110,7 +118,7 @@ struct MaxAlign { char c; } __attribute__((__aligned__));
 #elif defined(__clang__) || defined(__GNUC__)
 # define FOLLY_ALWAYS_INLINE inline __attribute__((__always_inline__))
 #else
-# define FOLLY_ALWAYS_INLINE
+# define FOLLY_ALWAYS_INLINE inline
 #endif
 
 // detection for 64 bit
@@ -124,6 +132,12 @@ struct MaxAlign { char c; } __attribute__((__aligned__));
 # define FOLLY_A64 1
 #else
 # define FOLLY_A64 0
+#endif
+
+#if defined (__powerpc64__)
+# define FOLLY_PPC64 1
+#else
+# define FOLLY_PPC64 0
 #endif
 
 // packing is very ugly in msvc
@@ -153,17 +167,11 @@ struct MaxAlign { char c; } __attribute__((__aligned__));
 # endif
 #endif
 
-
-/* Define macro wrappers for C++11's "final" and "override" keywords, which
- * are supported in gcc 4.7 but not gcc 4.6. */
-#if !defined(FOLLY_FINAL) && !defined(FOLLY_OVERRIDE)
-# if defined(__clang__) || __GNUC_PREREQ(4, 7)
-#  define FOLLY_FINAL final
-#  define FOLLY_OVERRIDE override
-# else
-#  define FOLLY_FINAL /**/
-#  define FOLLY_OVERRIDE /**/
-# endif
+#if defined(__GNUC__) && !defined(__APPLE__) && !__GNUC_PREREQ(4,9)
+// https://gcc.gnu.org/bugzilla/show_bug.cgi?id=56019
+// gcc 4.8.x incorrectly placed max_align_t in the root namespace
+// Alias it into std (where it's found in 4.9 and later)
+namespace std { typedef ::max_align_t max_align_t; }
 #endif
 
 /* Platform specific TLS support
@@ -200,6 +208,16 @@ struct MaxAlign { char c; } __attribute__((__aligned__));
 #else
 #define FOLLY_NAMESPACE_STD_BEGIN     namespace std {
 #define FOLLY_NAMESPACE_STD_END       }
+#endif
+
+// If the new c++ ABI is used, __cxx11 inline namespace needs to be added to
+// some types, e.g. std::list.
+#if _GLIBCXX_USE_CXX11_ABI
+# define FOLLY_GLIBCXX_NAMESPACE_CXX11_BEGIN _GLIBCXX_BEGIN_NAMESPACE_CXX11
+# define FOLLY_GLIBCXX_NAMESPACE_CXX11_END   _GLIBCXX_END_NAMESPACE_CXX11
+#else
+# define FOLLY_GLIBCXX_NAMESPACE_CXX11_BEGIN
+# define FOLLY_GLIBCXX_NAMESPACE_CXX11_END
 #endif
 
 // Some platforms lack clock_gettime(2) and clock_getres(2). Inject our own
@@ -258,7 +276,44 @@ typedef SSIZE_T ssize_t;
 // compiler specific to compiler specific
 // nolint
 # define __PRETTY_FUNCTION__ __FUNCSIG__
+
+// Hide a GCC specific thing that breaks MSVC if left alone.
+# define __extension__
+
+#ifdef _M_IX86_FP
+# define FOLLY_SSE _M_IX86_FP
+# define FOLLY_SSE_MINOR 0
 #endif
+
+#endif
+
+#ifndef FOLLY_SSE
+# if defined(__SSE4_2__)
+#  define FOLLY_SSE 4
+#  define FOLLY_SSE_MINOR 2
+# elif defined(__SSE4_1__)
+#  define FOLLY_SSE 4
+#  define FOLLY_SSE_MINOR 1
+# elif defined(__SSE4__)
+#  define FOLLY_SSE 4
+#  define FOLLY_SSE_MINOR 0
+# elif defined(__SSE3__)
+#  define FOLLY_SSE 3
+#  define FOLLY_SSE_MINOR 0
+# elif defined(__SSE2__)
+#  define FOLLY_SSE 2
+#  define FOLLY_SSE_MINOR 0
+# elif defined(__SSE__)
+#  define FOLLY_SSE 1
+#  define FOLLY_SSE_MINOR 0
+# else
+#  define FOLLY_SSE 0
+#  define FOLLY_SSE_MINOR 0
+# endif
+#endif
+
+#define FOLLY_SSE_PREREQ(major, minor) \
+  (FOLLY_SSE > major || FOLLY_SSE == major && FOLLY_SSE_MINOR >= minor)
 
 #if FOLLY_UNUSUAL_GFLAGS_NAMESPACE
 namespace FOLLY_GFLAGS_NAMESPACE { }
@@ -280,27 +335,55 @@ inline size_t malloc_usable_size(void* ptr) {
 #endif
 
 // RTTI may not be enabled for this compilation unit.
-#if defined(__GXX_RTTI) || defined(__cpp_rtti)
+#if defined(__GXX_RTTI) || defined(__cpp_rtti) || \
+    (defined(_MSC_VER) && defined(_CPPRTTI))
 # define FOLLY_HAS_RTTI 1
+#endif
+
+#ifdef _MSC_VER
+# include <intrin.h>
 #endif
 
 namespace folly {
 
+inline void asm_volatile_memory() {
+#if defined(__clang__) || defined(__GNUC__)
+  asm volatile("" : : : "memory");
+#elif defined(_MSC_VER)
+  ::_ReadWriteBarrier();
+#endif
+}
+
 inline void asm_volatile_pause() {
-#if defined(__i386__) || FOLLY_X64
+#if defined(_MSC_VER) && (defined(_M_IX86) || defined(_M_X64))
+  ::_mm_pause();
+#elif defined(__i386__) || FOLLY_X64
   asm volatile ("pause");
 #elif FOLLY_A64
   asm volatile ("wfe");
+#elif FOLLY_PPC64
+  asm volatile("or 27,27,27");
 #endif
 }
 inline void asm_pause() {
-#if defined(__i386__) || FOLLY_X64
+#if defined(_MSC_VER) && (defined(_M_IX86) || defined(_M_X64))
+  ::_mm_pause();
+#elif defined(__i386__) || FOLLY_X64
   asm ("pause");
 #elif FOLLY_A64
   asm ("wfe");
+#elif FOLLY_PPC64
+  asm ("or 31,31,31");
 #endif
 }
 
+constexpr size_t constexpr_strlen(const char* s) {
+#if defined(__clang__)
+  return __builtin_strlen(s);
+#else
+  return strlen(s);
+#endif
 }
 
+} // namespace folly
 #endif // FOLLY_PORTABILITY_H_

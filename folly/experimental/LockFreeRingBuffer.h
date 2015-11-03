@@ -87,7 +87,7 @@ public:
     friend class LockFreeRingBuffer;
   };
 
-  explicit LockFreeRingBuffer(size_t capacity) noexcept
+  explicit LockFreeRingBuffer(uint32_t capacity) noexcept
     : capacity_(capacity)
     , slots_(new detail::RingBufferSlot<T,Atom>[capacity])
     , ticket_(0)
@@ -99,6 +99,16 @@ public:
   void write(T& value) noexcept {
     uint64_t ticket = ticket_.fetch_add(1);
     slots_[idx(ticket)].write(turn(ticket), value);
+  }
+
+  /// Perform a single write of an object of type T.
+  /// Writes can block iff a previous writer has not yet completed a write
+  /// for the same slot (before the most recent wrap-around).
+  /// Returns a Cursor pointing to the just-written T.
+  Cursor writeAndGetCursor(T& value) noexcept {
+    uint64_t ticket = ticket_.fetch_add(1);
+    slots_[idx(ticket)].write(turn(ticket), value);
+    return Cursor(ticket);
   }
 
   /// Read the value at the cursor.
@@ -145,7 +155,7 @@ public:
   }
 
 private:
-  const size_t capacity_;
+  const uint32_t capacity_;
 
   const std::unique_ptr<detail::RingBufferSlot<T,Atom>[]> slots_;
 
@@ -156,7 +166,7 @@ private:
   }
 
   uint32_t turn(uint64_t ticket) noexcept {
-    return (ticket / capacity_);
+    return (uint32_t)(ticket / capacity_);
   }
 }; // LockFreeRingBuffer
 

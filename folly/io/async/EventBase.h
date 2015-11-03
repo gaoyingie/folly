@@ -29,6 +29,9 @@
 #include <queue>
 #include <cstdlib>
 #include <set>
+#include <unordered_set>
+#include <unordered_map>
+#include <mutex>
 #include <utility>
 #include <boost/intrusive/list.hpp>
 #include <boost/utility.hpp>
@@ -43,6 +46,18 @@ namespace folly {
 typedef std::function<void()> Cob;
 template <typename MessageT>
 class NotificationQueue;
+
+namespace detail {
+class EventBaseLocalBase;
+
+class EventBaseLocalBaseBase {
+ public:
+  virtual void onEventBaseDestruction(EventBase& evb) = 0;
+  virtual ~EventBaseLocalBaseBase() = default;
+};
+}
+template <typename T>
+class EventBaseLocal;
 
 class EventBaseObserver {
  public:
@@ -303,6 +318,15 @@ class EventBase : private boost::noncopyable,
   void runOnDestruction(LoopCallback* callback);
 
   /**
+   * Adds the given callback to a queue of things run after the notification
+   * queue is drained before the destruction of current EventBase.
+   *
+   * Note: will be called from the thread that invoked EventBase destructor,
+   *       after the final run of loop callbacks.
+   */
+  void runAfterDrain(Cob&& cob);
+
+  /**
    * Adds a callback that will run immediately *before* the event loop.
    * This is very similar to runInLoop(), but will not cause the loop to break:
    * For example, this callback could be used to get loop times.
@@ -402,11 +426,11 @@ class EventBase : private boost::noncopyable,
     return runImmediatelyOrRunInEventBaseThreadAndWait(std::bind(fn, arg));
   }
 
-    /*
+  /*
    * Like runInEventBaseThreadAndWait, except if the caller is already in the
    * event base thread, the functor is simply run inline.
    */
-bool runImmediatelyOrRunInEventBaseThreadAndWait(const Cob& fn);
+  bool runImmediatelyOrRunInEventBaseThreadAndWait(const Cob& fn);
 
   /**
    * Runs the given Cob at some time after the specified number of
@@ -662,6 +686,7 @@ bool runImmediatelyOrRunInEventBaseThreadAndWait(const Cob& fn);
   LoopCallbackList loopCallbacks_;
   LoopCallbackList runBeforeLoopCallbacks_;
   LoopCallbackList onDestructionCallbacks_;
+  LoopCallbackList runAfterDrainCallbacks_;
 
   // This will be null most of the time, but point to currentCallbacks
   // if we are in the middle of running loop callbacks, such that
@@ -671,7 +696,7 @@ bool runImmediatelyOrRunInEventBaseThreadAndWait(const Cob& fn);
 
   // stop_ is set by terminateLoopSoon() and is used by the main loop
   // to determine if it should exit
-  bool stop_;
+  std::atomic<bool> stop_;
 
   // The ID of the thread running the main loop.
   // 0 if loop is not running.
@@ -728,6 +753,16 @@ bool runImmediatelyOrRunInEventBaseThreadAndWait(const Cob& fn);
 
   // allow runOnDestruction() to be called from any threads
   std::mutex onDestructionCallbacksMutex_;
+
+  // allow runAfterDrain() to be called from any threads
+  std::mutex runAfterDrainCallbacksMutex_;
+
+  // see EventBaseLocal
+  friend class detail::EventBaseLocalBase;
+  template <typename T> friend class EventBaseLocal;
+  std::mutex localStorageMutex_;
+  std::unordered_map<uint64_t, std::shared_ptr<void>> localStorage_;
+  std::unordered_set<detail::EventBaseLocalBaseBase*> localStorageToDtor_;
 };
 
 } // folly

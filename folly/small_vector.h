@@ -23,8 +23,6 @@
 #ifndef FOLLY_SMALL_VECTOR_H_
 #define FOLLY_SMALL_VECTOR_H_
 
-#include <folly/Portability.h>
-
 #include <stdexcept>
 #include <cstdlib>
 #include <type_traits>
@@ -46,9 +44,11 @@
 #include <boost/mpl/count.hpp>
 #include <boost/mpl/max.hpp>
 
+#include <folly/FormatTraits.h>
 #include <folly/Malloc.h>
+#include <folly/Portability.h>
 
-#if defined(__GNUC__) && FOLLY_X64
+#if defined(__GNUC__) && (FOLLY_X64 || FOLLY_PPC64)
 # include <folly/SmallLocks.h>
 # define FB_PACK_ATTR FOLLY_PACK_ATTR
 # define FB_PACK_PUSH FOLLY_PACK_PUSH
@@ -658,6 +658,17 @@ public:
     emplaceBack(std::forward<Args>(args)...);
   }
 
+  void emplace_back(const value_type& t) {
+    push_back(t);
+  }
+  void emplace_back(value_type& t) {
+    push_back(t);
+  }
+
+  void emplace_back(value_type&& t) {
+    push_back(std::move(t));
+  }
+
   void push_back(value_type&& t) {
     if (capacity() == size()) {
       makeSize(std::max(size_type(2), 3 * size() / 2), &t, size());
@@ -668,9 +679,17 @@ public:
   }
 
   void push_back(value_type const& t) {
-    // Make a copy and forward to the rvalue value_type&& overload
-    // above.
-    push_back(value_type(t));
+    // TODO: we'd like to make use of makeSize (it can be optimized better,
+    // because it manipulates the internals)
+    // unfortunately the current implementation only supports moving from
+    // a supplied rvalue, and doing an extra move just to reuse it is a perf
+    // net loss
+    if (size() == capacity()) {// && isInside(&t)) {
+      value_type tmp(t);
+      emplaceBack(std::move(tmp));
+    } else {
+      emplaceBack(t);
+    }
   }
 
   void pop_back() {
@@ -809,13 +828,6 @@ private:
     this->setSize(size() + 1);
   }
 
-  /*
-   * Special case of emplaceBack for rvalue
-   */
-  void emplaceBack(value_type&& t) {
-    push_back(std::move(t));
-  }
-
   static iterator unconst(const_iterator it) {
     return const_cast<iterator>(it);
   }
@@ -871,7 +883,7 @@ private:
       // With iterators that only allow a single pass, we can't really
       // do anything sane here.
       while (first != last) {
-        push_back(*first++);
+        emplace_back(*first++);
       }
       return;
     }
@@ -1046,7 +1058,7 @@ private:
     }
   } FB_PACK_ATTR;
 
-#if FOLLY_X64
+#if (FOLLY_X64 || FOLLY_PPC64)
   typedef unsigned char InlineStorageType[sizeof(value_type) * MaxInline];
 #else
   typedef typename std::aligned_storage<
@@ -1129,7 +1141,17 @@ void swap(small_vector<T,MaxInline,A,B,C>& a,
 
 //////////////////////////////////////////////////////////////////////
 
-}
+namespace detail {
+
+// Format support.
+template <class T, size_t M, class A, class B, class C>
+struct IndexableTraits<small_vector<T, M, A, B, C>>
+  : public IndexableTraitsSeq<small_vector<T, M, A, B, C>> {
+};
+
+}  // namespace detail
+
+}  // namespace folly
 
 #pragma GCC diagnostic pop
 

@@ -37,24 +37,81 @@ namespace folly {
  * @author Xu Ning (xning@fb.com)
  */
 
-template<typename T, typename Dp = std::default_delete<T>, typename... Args>
-typename std::enable_if<!std::is_array<T>::value, std::unique_ptr<T, Dp>>::type
+#if __cplusplus >= 201402L || \
+    defined __cpp_lib_make_unique && __cpp_lib_make_unique >= 201304L
+
+/* using override */ using std::make_unique;
+
+#else
+
+template<typename T, typename... Args>
+typename std::enable_if<!std::is_array<T>::value, std::unique_ptr<T>>::type
 make_unique(Args&&... args) {
-  return std::unique_ptr<T, Dp>(new T(std::forward<Args>(args)...));
+  return std::unique_ptr<T>(new T(std::forward<Args>(args)...));
 }
 
 // Allows 'make_unique<T[]>(10)'. (N3690 s20.9.1.4 p3-4)
-template<typename T, typename Dp = std::default_delete<T>>
-typename std::enable_if<std::is_array<T>::value, std::unique_ptr<T, Dp>>::type
+template<typename T>
+typename std::enable_if<std::is_array<T>::value, std::unique_ptr<T>>::type
 make_unique(const size_t n) {
-  return std::unique_ptr<T, Dp>(new typename std::remove_extent<T>::type[n]());
+  return std::unique_ptr<T>(new typename std::remove_extent<T>::type[n]());
 }
 
 // Disallows 'make_unique<T[10]>()'. (N3690 s20.9.1.4 p5)
-template<typename T, typename Dp = std::default_delete<T>, typename... Args>
+template<typename T, typename... Args>
 typename std::enable_if<
-  std::extent<T>::value != 0, std::unique_ptr<T, Dp>>::type
+  std::extent<T>::value != 0, std::unique_ptr<T>>::type
 make_unique(Args&&...) = delete;
+
+#endif
+
+/**
+ * static_function_deleter
+ *
+ * So you can write this:
+ *
+ *      using RSA_deleter = folly::static_function_deleter<RSA, &RSA_free>;
+ *      auto rsa = std::unique_ptr<RSA, RSA_deleter>(RSA_new());
+ *      RSA_generate_key_ex(rsa.get(), bits, exponent, nullptr);
+ *      rsa = nullptr;  // calls RSA_free(rsa.get())
+ *
+ * This would be sweet as well for BIO, but unfortunately BIO_free has signature
+ * int(BIO*) while we require signature void(BIO*). So you would need to make a
+ * wrapper for it:
+ *
+ *      inline void BIO_free_fb(BIO* bio) { CHECK_EQ(1, BIO_free(bio)); }
+ *      using BIO_deleter = folly::static_function_deleter<BIO, &BIO_free_fb>;
+ *      auto buf = std::unique_ptr<BIO, BIO_deleter>(BIO_new(BIO_s_mem()));
+ *      buf = nullptr;  // calls BIO_free(buf.get())
+ */
+
+template <typename T, void(*f)(T*)>
+struct static_function_deleter {
+  void operator()(T* t) { f(t); }
+};
+
+/**
+ *  to_shared_ptr
+ *
+ *  Convert unique_ptr to shared_ptr without specifying the template type
+ *  parameter and letting the compiler deduce it.
+ *
+ *  So you can write this:
+ *
+ *      auto sptr = to_shared_ptr(getSomethingUnique<T>());
+ *
+ *  Instead of this:
+ *
+ *      auto sptr = shared_ptr<T>(getSomethingUnique<T>());
+ *
+ *  Useful when `T` is long, such as:
+ *
+ *      using T = foobar::cpp2::FooBarServiceAsyncClient;
+ */
+template <typename T, typename D>
+std::shared_ptr<T> to_shared_ptr(std::unique_ptr<T, D>&& ptr) {
+  return std::shared_ptr<T>(std::move(ptr));
+}
 
 /**
  * A SimpleAllocator must provide two methods:

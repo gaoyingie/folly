@@ -28,6 +28,7 @@
 #include <folly/io/async/EventHandler.h>
 #include <folly/io/async/DelayedDestruction.h>
 
+#include <chrono>
 #include <memory>
 #include <map>
 
@@ -363,10 +364,20 @@ class AsyncSocket : virtual public AsyncTransportWrapper {
 
   bool isEorTrackingEnabled() const override { return false; }
 
-  void setEorTracking(bool track) override {}
+  void setEorTracking(bool /*track*/) override {}
 
   bool connecting() const override {
     return (state_ == StateEnum::CONNECTING);
+  }
+
+  virtual bool isClosedByPeer() const {
+    return (state_ == StateEnum::CLOSED &&
+            (readErr_ == READ_EOF || readErr_ == READ_ERROR));
+  }
+
+  virtual bool isClosedBySelf() const {
+    return (state_ == StateEnum::CLOSED &&
+            (readErr_ != READ_EOF && readErr_ != READ_ERROR));
   }
 
   size_t getAppBytesWritten() const override {
@@ -383,6 +394,10 @@ class AsyncSocket : virtual public AsyncTransportWrapper {
 
   size_t getRawBytesReceived() const override {
     return getAppBytesReceived();
+  }
+
+  std::chrono::nanoseconds getConnectTime() const {
+    return connectEndTime_ - connectStartTime_;
   }
 
   // Methods controlling socket options
@@ -475,6 +490,10 @@ class AsyncSocket : virtual public AsyncTransportWrapper {
     return setsockopt(fd_, level, optname, optval, sizeof(T));
   }
 
+  virtual void setPeek(bool peek) {
+    peek_ = peek;
+  }
+
   enum class StateEnum : uint8_t {
     UNINIT,
     CONNECTING,
@@ -542,6 +561,7 @@ class AsyncSocket : virtual public AsyncTransportWrapper {
     READ_EOF = 0,
     READ_ERROR = -1,
     READ_BLOCKING = -2,
+    READ_NO_ERROR = -3,
   };
 
   /**
@@ -636,6 +656,7 @@ class AsyncSocket : virtual public AsyncTransportWrapper {
   void ioReady(uint16_t events) noexcept;
   virtual void checkForImmediateRead() noexcept;
   virtual void handleInitialReadWrite() noexcept;
+  virtual void prepareReadBuffer(void** buf, size_t* buflen) noexcept;
   virtual void handleRead() noexcept;
   virtual void handleWrite() noexcept;
   virtual void handleConnect() noexcept;
@@ -651,7 +672,7 @@ class AsyncSocket : virtual public AsyncTransportWrapper {
    * READ_ERROR on error, or READ_BLOCKING if the operation will
    * block.
    */
-  virtual ssize_t performRead(void* buf, size_t buflen);
+  virtual ssize_t performRead(void** buf, size_t* buflen, size_t* offset);
 
   /**
    * Populate an iovec array from an IOBuf and attempt to write it.
@@ -736,6 +757,8 @@ class AsyncSocket : virtual public AsyncTransportWrapper {
                  const AsyncSocketException& ex);
   void failWrite(const char* fn, const AsyncSocketException& ex);
   void failAllWrites(const AsyncSocketException& ex);
+  void invokeConnectErr(const AsyncSocketException& ex);
+  void invokeConnectSuccess();
   void invalidState(ConnectCallback* callback);
   void invalidState(ReadCallback* callback);
   void invalidState(WriteCallback* callback);
@@ -762,6 +785,14 @@ class AsyncSocket : virtual public AsyncTransportWrapper {
   ShutdownSocketSet* shutdownSocketSet_;
   size_t appBytesReceived_;             ///< Num of bytes received from socket
   size_t appBytesWritten_;              ///< Num of bytes written to socket
+  bool isBufferMovable_{false};
+
+  bool peek_{false}; // Peek bytes.
+
+  int8_t readErr_{READ_NO_ERROR};      ///< The read error encountered, if any.
+
+  std::chrono::steady_clock::time_point connectStartTime_;
+  std::chrono::steady_clock::time_point connectEndTime_;
 };
 
 

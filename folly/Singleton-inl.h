@@ -32,7 +32,26 @@ void SingletonHolder<T>::registerSingleton(CreateFunc c, TeardownFunc t) {
   std::lock_guard<std::mutex> entry_lock(mutex_);
 
   if (state_ != SingletonHolderState::NotRegistered) {
-    throw std::logic_error("Double registration");
+    /* Possible causes:
+     *
+     * You have two instances of the same
+     * folly::Singleton<Class>. Probably because you define the
+     * singleton in a header included in multiple places? In general,
+     * folly::Singleton shouldn't be in the header, only off in some
+     * anonymous namespace in a cpp file. Code needing the singleton
+     * will find it when that code references folly::Singleton<Class>.
+     *
+     * Alternatively, you could have 2 singletons with the same type
+     * defined with a different name in a .cpp (source) file. For
+     * example:
+     *
+     * Singleton<int> a([] { return new int(3); });
+     * Singleton<int> b([] { return new int(4); });
+     *
+     */
+    LOG(FATAL) << "Double registration of singletons of the same "
+               << "underlying type; check for multiple definitions "
+               << "of type folly::Singleton<" + type_.name() + ">";
   }
 
   create_ = std::move(c);
@@ -44,7 +63,8 @@ void SingletonHolder<T>::registerSingleton(CreateFunc c, TeardownFunc t) {
 template <typename T>
 void SingletonHolder<T>::registerSingletonMock(CreateFunc c, TeardownFunc t) {
   if (state_ == SingletonHolderState::NotRegistered) {
-    throw std::logic_error("Registering mock before singleton was registered");
+    LOG(FATAL)
+        << "Registering mock before singleton was registered: " << type_.name();
   }
   destroyInstance();
 
@@ -56,14 +76,17 @@ void SingletonHolder<T>::registerSingletonMock(CreateFunc c, TeardownFunc t) {
 
 template <typename T>
 T* SingletonHolder<T>::get() {
-  if (LIKELY(state_ == SingletonHolderState::Living)) {
+  if (LIKELY(state_.load(std::memory_order_acquire) ==
+             SingletonHolderState::Living)) {
     return instance_ptr_;
   }
   createInstance();
 
   if (instance_weak_.expired()) {
     throw std::runtime_error(
-      "Raw pointer to a singleton requested after its destruction.");
+        "Raw pointer to a singleton requested after its destruction."
+        " Singleton type is: " +
+        type_.name());
   }
 
   return instance_ptr_;
@@ -71,11 +94,22 @@ T* SingletonHolder<T>::get() {
 
 template <typename T>
 std::weak_ptr<T> SingletonHolder<T>::get_weak() {
-  if (UNLIKELY(state_ != SingletonHolderState::Living)) {
+  if (UNLIKELY(state_.load(std::memory_order_acquire) !=
+               SingletonHolderState::Living)) {
     createInstance();
   }
 
   return instance_weak_;
+}
+
+template <typename T>
+std::shared_ptr<T> SingletonHolder<T>::try_get() {
+  if (UNLIKELY(state_.load(std::memory_order_acquire) !=
+               SingletonHolderState::Living)) {
+    createInstance();
+  }
+
+  return instance_weak_.lock();
 }
 
 template <typename T>
@@ -114,32 +148,56 @@ SingletonHolder<T>::SingletonHolder(TypeDescriptor type__,
 }
 
 template <typename T>
+bool SingletonHolder<T>::creationStarted() {
+  // If alive, then creation was of course started.
+  // This is flipped after creating_thread_ was set, and before it was reset.
+  if (state_.load(std::memory_order_acquire) == SingletonHolderState::Living) {
+    return true;
+  }
+
+  // Not yet built.  Is it currently in progress?
+  if (creating_thread_.load(std::memory_order_acquire) != std::thread::id()) {
+    return true;
+  }
+
+  return false;
+}
+
+template <typename T>
 void SingletonHolder<T>::createInstance() {
-  // There's no synchronization here, so we may not see the current value
-  // for creating_thread if it was set by other thread, but we only care about
-  // it if it was set by current thread anyways.
-  if (creating_thread_ == std::this_thread::get_id()) {
-    throw std::out_of_range(std::string("circular singleton dependency: ") +
-                            type_.name());
+  if (creating_thread_.load(std::memory_order_acquire) ==
+        std::this_thread::get_id()) {
+    LOG(FATAL) << "circular singleton dependency: " << type_.name();
   }
 
   std::lock_guard<std::mutex> entry_lock(mutex_);
-  if (state_ == SingletonHolderState::Living) {
+  if (state_.load(std::memory_order_acquire) == SingletonHolderState::Living) {
     return;
   }
-  if (state_ == SingletonHolderState::NotRegistered) {
-    throw std::out_of_range("Creating instance for unregistered singleton");
+  if (state_.load(std::memory_order_acquire) ==
+        SingletonHolderState::NotRegistered) {
+    auto ptr = SingletonVault::stackTraceGetter().load();
+    LOG(FATAL) << "Creating instance for unregistered singleton: "
+               << type_.name() << "\n"
+               << "Stacktrace:"
+               << "\n" << (ptr ? (*ptr)() : "(not available)");
   }
 
-  if (state_ == SingletonHolderState::Living) {
+  if (state_.load(std::memory_order_acquire) == SingletonHolderState::Living) {
     return;
   }
 
-  creating_thread_ = std::this_thread::get_id();
+  SCOPE_EXIT {
+    // Clean up creator thread when complete, and also, in case of errors here,
+    // so that subsequent attempts don't think this is still in the process of
+    // being built.
+    creating_thread_.store(std::thread::id(), std::memory_order_release);
+  };
+
+  creating_thread_.store(std::this_thread::get_id(), std::memory_order_release);
 
   RWSpinLock::ReadHolder rh(&vault_.stateMutex_);
   if (vault_.state_ == SingletonVault::SingletonVaultState::Quiescing) {
-    creating_thread_ = std::thread::id();
     return;
   }
 
@@ -180,13 +238,12 @@ void SingletonHolder<T>::createInstance() {
 
   instance_weak_ = instance_;
   instance_ptr_ = instance_.get();
-  creating_thread_ = std::thread::id();
   destroy_baton_ = std::move(destroy_baton);
   print_destructor_stack_trace_ = std::move(print_destructor_stack_trace);
 
   // This has to be the last step, because once state is Living other threads
   // may access instance and instance_weak w/o synchronization.
-  state_.store(SingletonHolderState::Living);
+  state_.store(SingletonHolderState::Living, std::memory_order_release);
 
   {
     RWSpinLock::WriteHolder wh(&vault_.mutex_);

@@ -100,3 +100,20 @@ TEST(SharedPromise, moveMove) {
   p = std::move(p2);
   p.setValue(std::make_shared<int>(1));
 }
+
+TEST(SharedPromise, setWith) {
+  SharedPromise<int> p;
+  p.setWith([]{ return 1; });
+  EXPECT_EQ(1, p.getFuture().value());
+}
+
+TEST(SharedPromise, isFulfilled) {
+  SharedPromise<int> p;
+  EXPECT_FALSE(p.isFulfilled());
+  auto p2 = std::move(p);
+  EXPECT_FALSE(p2.isFulfilled());
+  p2.setValue(1);
+  EXPECT_TRUE(p2.isFulfilled());
+  p = std::move(p2);
+  EXPECT_TRUE(p.isFulfilled());
+}

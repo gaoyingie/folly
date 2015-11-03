@@ -48,11 +48,11 @@ void FormatValue<double>::formatHelper(
   }
 
   // 2+: for null terminator and optional sign shenanigans.
-  char buf[2 + std::max({
-      (2 + DoubleToStringConverter::kMaxFixedDigitsBeforePoint +
-       DoubleToStringConverter::kMaxFixedDigitsAfterPoint),
-      (8 + DoubleToStringConverter::kMaxExponentialDigits),
-      (7 + DoubleToStringConverter::kMaxPrecisionDigits)})];
+  char buf[2 + std::max(
+      2 + DoubleToStringConverter::kMaxFixedDigitsBeforePoint +
+       DoubleToStringConverter::kMaxFixedDigitsAfterPoint,
+      std::max(8 + DoubleToStringConverter::kMaxExponentialDigits,
+      7 + DoubleToStringConverter::kMaxPrecisionDigits))];
   StringBuilder builder(buf + 1, static_cast<int> (sizeof(buf) - 1));
 
   char plusSign;
@@ -209,12 +209,25 @@ void FormatArg::initSlow() {
       if (++p == end) return;
     }
 
-    if (*p >= '0' && *p <= '9') {
-      auto b = p;
+    auto readInt = [&] {
+      auto const b = p;
       do {
         ++p;
       } while (p != end && *p >= '0' && *p <= '9');
-      width = to<int>(StringPiece(b, p));
+      return to<int>(StringPiece(b, p));
+    };
+
+    if (*p == '*') {
+      width = kDynamicWidth;
+      ++p;
+
+      if (p == end) return;
+
+      if (*p >= '0' && *p <= '9') widthIndex = readInt();
+
+      if (p == end) return;
+    } else if (*p >= '0' && *p <= '9') {
+      width = readInt();
 
       if (p == end) return;
     }

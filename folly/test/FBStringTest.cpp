@@ -119,9 +119,7 @@ template <class String> void clause11_21_4_2_e(String & test) {
 }
 template <class String> void clause11_21_4_2_f(String & test) {
   // Constructor from char*
-  const size_t
-    pos = random(0, test.size()),
-    n = random(0, test.size() - pos);
+  const size_t pos = random(0, test.size());
   String before(test.data(), test.size());
   String s(test.c_str() + pos);
   String after(test.data(), test.size());
@@ -1291,15 +1289,12 @@ TEST(FBString, testFrontBack) {
 
 TEST(FBString, noexcept) {
   EXPECT_TRUE(noexcept(fbstring()));
-  // std::move is not marked noexcept in gcc 4.6, sigh
-#if __GNUC_PREREQ(4, 7)
   fbstring x;
   EXPECT_FALSE(noexcept(fbstring(x)));
   EXPECT_TRUE(noexcept(fbstring(std::move(x))));
   fbstring y;
   EXPECT_FALSE(noexcept(y = x));
   EXPECT_TRUE(noexcept(y = std::move(x)));
-#endif
 }
 
 TEST(FBString, iomanip) {

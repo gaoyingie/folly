@@ -27,12 +27,14 @@
 #include <folly/Executor.h>
 #include <folly/Likely.h>
 #include <folly/IntrusiveList.h>
+#include <folly/io/async/Request.h>
 #include <folly/futures/Try.h>
 
 #include <folly/experimental/ExecutionObserver.h>
 #include <folly/experimental/fibers/BoostContextCompatibility.h>
 #include <folly/experimental/fibers/Fiber.h>
 #include <folly/experimental/fibers/GuardPageAllocator.h>
+#include <folly/experimental/fibers/TimeoutController.h>
 #include <folly/experimental/fibers/traits.h>
 
 namespace folly { namespace fibers {
@@ -82,6 +84,18 @@ class FiberManager : public ::folly::Executor {
      * by the number of active fibers + maxFibersPoolSize.
      */
     size_t maxFibersPoolSize{1000};
+
+    /**
+     * Protect limited amount of fiber stacks with guard pages.
+     */
+    bool useGuardPages{false};
+
+    /**
+     * Free unnecessary fibers in the fibers pool every fibersPoolResizePeriodMs
+     * milliseconds. If value is 0, periodic resizing of the fibers pool is
+     * disabled.
+     */
+    uint32_t fibersPoolResizePeriodMs{0};
 
     constexpr Options() {}
   };
@@ -219,6 +233,13 @@ class FiberManager : public ::folly::Executor {
   bool hasActiveFiber() const;
 
   /**
+   * @return The currently running fiber or null if no fiber is executing.
+   */
+  Fiber* currentFiber() const {
+    return currentFiber_;
+  }
+
+  /**
    * @return What was the most observed fiber stack usage (in bytes).
    */
   size_t stackHighWatermark() const;
@@ -239,6 +260,14 @@ class FiberManager : public ::folly::Executor {
    */
   void setObserver(ExecutionObserver* observer);
 
+  /**
+   * Returns an estimate of the number of fibers which are waiting to run (does
+   * not include fibers or tasks scheduled remotely).
+   */
+  size_t runQueueSize() const {
+    return readyFibers_.size() + yieldedFibers_.size();
+  }
+
   static FiberManager& getFiberManager();
   static FiberManager* getFiberManagerUnsafe();
 
@@ -252,13 +281,17 @@ class FiberManager : public ::folly::Executor {
 
   struct RemoteTask {
     template <typename F>
-    explicit RemoteTask(F&& f) : func(std::forward<F>(f)) {}
+    explicit RemoteTask(F&& f) :
+        func(std::forward<F>(f)),
+        rcontext(RequestContext::saveContext()) {}
     template <typename F>
     RemoteTask(F&& f, const Fiber::LocalData& localData_) :
         func(std::forward<F>(f)),
-        localData(folly::make_unique<Fiber::LocalData>(localData_)) {}
+        localData(folly::make_unique<Fiber::LocalData>(localData_)),
+        rcontext(RequestContext::saveContext()) {}
     std::function<void()> func;
     std::unique_ptr<Fiber::LocalData> localData;
+    std::shared_ptr<RequestContext> rcontext;
     AtomicLinkedListHook<RemoteTask> nextRemoteTask;
   };
 
@@ -281,6 +314,12 @@ class FiberManager : public ::folly::Executor {
   size_t fibersActive_{0};      /**< number of running or blocked fibers */
   size_t fiberId_{0};           /**< id of last fiber used */
 
+  /**
+   * Maximum number of active fibers in the last period lasting
+   * Options::fibersPoolResizePeriod milliseconds.
+   */
+  size_t maxFibersActiveLastPeriod_{0};
+
   FContext::ContextStruct mainContext_;  /**< stores loop function context */
 
   std::unique_ptr<LoopController> loopController_;
@@ -290,7 +329,7 @@ class FiberManager : public ::folly::Executor {
    * When we are inside FiberManager loop this points to FiberManager. Otherwise
    * it's nullptr
    */
-  static __thread FiberManager* currentFiberManager_;
+  static FOLLY_TLS FiberManager* currentFiberManager_;
 
   /**
    * runInMainContext implementation for non-void functions.
@@ -361,6 +400,19 @@ class FiberManager : public ::folly::Executor {
       remoteTaskQueue_;
 
   std::shared_ptr<TimeoutController> timeoutManager_;
+
+  struct FibersPoolResizer {
+    explicit FibersPoolResizer(FiberManager& fm) :
+      fiberManager_(fm) {}
+    void operator()();
+   private:
+    FiberManager& fiberManager_;
+  };
+
+  FibersPoolResizer fibersPoolResizer_;
+  bool fibersPoolResizerScheduled_{false};
+
+  void doFibersPoolResizing();
 
   /**
    * Only local of this type will be available for fibers.

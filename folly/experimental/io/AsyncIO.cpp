@@ -348,11 +348,13 @@ std::ostream& operator<<(std::ostream& os, const iocb& cb) {
   switch (cb.aio_lio_opcode) {
     case IO_CMD_PREAD:
     case IO_CMD_PWRITE:
-      os << folly::format("buf={}, off={}, size={}, ",
-                          cb.u.c.buf, cb.u.c.nbytes, cb.u.c.offset);
+      os << folly::format("buf={}, offset={}, nbytes={}, ",
+                          cb.u.c.buf, cb.u.c.offset, cb.u.c.nbytes);
+      break;
     default:
       os << "[TODO: write debug string for "
          << iocbCmdToString(cb.aio_lio_opcode) << "] ";
+      break;
   }
 
   return os;
@@ -368,7 +370,11 @@ std::ostream& operator<<(std::ostream& os, const AsyncIOOp& op) {
   }
 
   if (op.state_ == AsyncIOOp::State::COMPLETED) {
-    os << "result=" << op.result_ << ", ";
+    os << "result=" << op.result_;
+    if (op.result_ < 0) {
+      os << " (" << errnoStr(-op.result_) << ')';
+    }
+    os << ", ";
   }
 
   return os << "}";
